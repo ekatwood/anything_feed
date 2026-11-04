@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
 import 'human_test.dart';
 import 'make_post.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
-    // options: DefaultFirebaseOptions.currentPlatform, // Configure for your Firebase project
+    options: DefaultFirebaseOptions.currentPlatform, // Configure for your Firebase project
   );
   runApp(const TrendingNowApp());
 }
@@ -36,10 +37,12 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
       theme: ThemeData(
         primarySwatch: Colors.blue,
         brightness: Brightness.light,
+        fontFamily: 'CormorantGaramond'
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
         primarySwatch: Colors.blue,
+        fontFamily: 'CormorantGaramond'
       ),
       themeMode: _themeMode,
       home: FeedPage(onThemeChanged: _toggleTheme, currentThemeMode: _themeMode),
