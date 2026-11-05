@@ -31,18 +31,25 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
 
   @override
   Widget build(BuildContext context) {
+    const baseTextTheme = TextTheme(
+      bodyLarge: TextStyle(fontSize: 21),   // Increased from default 16
+      bodyMedium: TextStyle(fontSize: 18),  // Increased from default 14
+      bodySmall: TextStyle(fontSize: 16),   // Increased from default 12
+    );
     return MaterialApp(
       title: 'Trending Now',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primarySwatch: Colors.blue,
         brightness: Brightness.light,
-        fontFamily: 'CormorantGaramond'
+        fontFamily: 'CormorantGaramond',
+        textTheme: baseTextTheme,
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
         primarySwatch: Colors.blue,
-        fontFamily: 'CormorantGaramond'
+        fontFamily: 'CormorantGaramond',
+        textTheme: baseTextTheme,
       ),
       themeMode: _themeMode,
       home: FeedPage(onThemeChanged: _toggleTheme, currentThemeMode: _themeMode),
@@ -202,7 +209,13 @@ class _FeedPageState extends State<FeedPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Trending Now'),
+        title: const Text(
+            'Trending Now',
+          style: TextStyle(
+            fontSize: 28, // Make it bigger
+            fontWeight: FontWeight.w700, // Apply font weight 700
+          ),
+        ),
         actions: [
           IconButton(
             icon: Icon(isDarkMode ? Icons.wb_sunny : Icons.nightlight_round),
@@ -227,8 +240,12 @@ class _FeedPageState extends State<FeedPage> {
               icon: const Icon(Icons.add),
               label: const Text('Make a Post'),
               style: ElevatedButton.styleFrom(
+                textStyle: const TextStyle(
+                  fontFamily: 'CormorantGaramond', // Explicitly enforce custom font
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
           ),
