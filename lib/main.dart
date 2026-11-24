@@ -1,14 +1,15 @@
+import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'firebase_options.dart';
-import 'human_test.dart';
 import 'make_post.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform, // Configure for your Firebase project
+    options: DefaultFirebaseOptions.currentPlatform,
   );
   runApp(const TrendingNowApp());
 }
@@ -32,9 +33,9 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
   @override
   Widget build(BuildContext context) {
     const baseTextTheme = TextTheme(
-      bodyLarge: TextStyle(fontSize: 21),   // Increased from default 16
-      bodyMedium: TextStyle(fontSize: 18),  // Increased from default 14
-      bodySmall: TextStyle(fontSize: 16),   // Increased from default 12
+      bodyLarge: TextStyle(fontSize: 21),
+      bodyMedium: TextStyle(fontSize: 18),
+      bodySmall: TextStyle(fontSize: 16),
     );
     return MaterialApp(
       title: 'Trending Now',
@@ -67,7 +68,11 @@ class FeedPage extends StatefulWidget {
   State<FeedPage> createState() => _FeedPageState();
 }
 
-class _FeedPageState extends State<FeedPage> {
+class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
+  static const int _minDwellMs = 3000; // 3-second lower bound
+  static const int _maxStretchMs = 30000; // 30-second cap per centered stretch
+  static const Duration _flushInterval = Duration(seconds: 150); // 2.5 minutes
+
   String _selectedFilter = 'Newest';
   final List<String> _filters = [
     'Newest',
@@ -83,22 +88,186 @@ class _FeedPageState extends State<FeedPage> {
   bool _hasMore = true;
   DocumentSnapshot? _lastDocument;
   final int _limit = 10;
+
   final ScrollController _scrollController = ScrollController();
+  final GlobalKey _feedViewportKey = GlobalKey();
+  final Map<String, GlobalKey> _postKeys = {};
+
+  // Non-UI dwell tracking state (no setState on scroll/focus updates)
+  String? _currentCenteredPostId;
+  DateTime? _centeredSince;
+  DateTime? _lastFocusSampleTime;
+  final Map<String, int> _pendingViewMs = {};
+  Timer? _flushTimer;
+  Timer? _focusSampleTimer;
 
   @override
   void initState() {
     super.initState();
-    _fetchPosts();
+    WidgetsBinding.instance.addObserver(this);
     _scrollController.addListener(_onScroll);
+    _fetchPosts();
+
+    _flushTimer = Timer.periodic(_flushInterval, (_) {
+      _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: true);
+      _flushViewMetrics();
+    });
+
+    // Periodically sample so long stays on a single post respect the 30s cap
+    _focusSampleTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _updateCenteredPostFocus();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
+      _flushViewMetrics();
+    } else if (state == AppLifecycleState.resumed) {
+      _updateCenteredPostFocus();
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _flushTimer?.cancel();
+    _focusSampleTimer?.cancel();
+    _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
+    _flushViewMetrics();
     _scrollController.dispose();
     super.dispose();
   }
 
+  void _updateCenteredPostFocus() {
+    final now = DateTime.now();
+    final viewportContext = _feedViewportKey.currentContext;
+    if (viewportContext == null) {
+      _finalizeCenteredStretch(now, restartIfStillCentered: false);
+      return;
+    }
+
+    final viewportBox = viewportContext.findRenderObject() as RenderBox?;
+    if (viewportBox == null || !viewportBox.hasSize || !viewportBox.attached) {
+      return;
+    }
+
+    final viewportOrigin = viewportBox.localToGlobal(Offset.zero);
+    final viewportTop = viewportOrigin.dy;
+    final viewportBottom = viewportTop + viewportBox.size.height;
+    final viewportCenterY = viewportTop + (viewportBox.size.height / 2);
+
+    String? bestPostId;
+    double bestDistance = double.infinity;
+
+    for (final doc in _posts) {
+      final postId = doc.id;
+      final key = _postKeys[postId];
+      final postContext = key?.currentContext;
+      if (postContext == null) continue;
+
+      final renderObject = postContext.findRenderObject();
+      if (renderObject is! RenderBox || !renderObject.hasSize || !renderObject.attached) {
+        continue;
+      }
+
+      final postTop = renderObject.localToGlobal(Offset.zero).dy;
+      final postHeight = renderObject.size.height;
+      final postBottom = postTop + postHeight;
+
+      // Ignore cards completely outside the feed viewport
+      if (postBottom <= viewportTop || postTop >= viewportBottom) {
+        continue;
+      }
+
+      final postCenterY = postTop + (postHeight / 2);
+      final distanceToCenter = (postCenterY - viewportCenterY).abs();
+
+      if (distanceToCenter < bestDistance) {
+        bestDistance = distanceToCenter;
+        bestPostId = postId;
+      }
+    }
+
+    if (bestPostId == _currentCenteredPostId) {
+      if (_currentCenteredPostId != null && _centeredSince != null) {
+        final rawElapsed = now.difference(_centeredSince!).inMilliseconds;
+        // Enforce 30-second cap on the active continuous stretch
+        if (rawElapsed >= _maxStretchMs) {
+          _recordCappedStretch(_currentCenteredPostId!, _maxStretchMs);
+          _centeredSince = now;
+        }
+      }
+      _lastFocusSampleTime = now;
+      return;
+    }
+
+    // Centered post changed: finalize previous stretch and start new one
+    _finalizeCenteredStretch(now, restartIfStillCentered: false);
+    _currentCenteredPostId = bestPostId;
+    _centeredSince = bestPostId != null ? now : null;
+    _lastFocusSampleTime = now;
+  }
+
+  void _finalizeCenteredStretch(DateTime now, {required bool restartIfStillCentered}) {
+    final activeId = _currentCenteredPostId;
+    final start = _centeredSince;
+    if (activeId != null && start != null) {
+      final elapsedMs = now.difference(start).inMilliseconds;
+      final cappedMs = math.min(elapsedMs, _maxStretchMs);
+      if (cappedMs >= _minDwellMs) {
+        _pendingViewMs[activeId] = (_pendingViewMs[activeId] ?? 0) + cappedMs;
+      }
+    }
+
+    if (restartIfStillCentered && activeId != null) {
+      _centeredSince = now;
+    } else {
+      _currentCenteredPostId = null;
+      _centeredSince = null;
+    }
+  }
+
+  void _recordCappedStretch(String postId, int cappedMs) {
+    if (cappedMs >= _minDwellMs) {
+      _pendingViewMs[postId] = (_pendingViewMs[postId] ?? 0) + cappedMs;
+    }
+  }
+
+  Future<void> _flushViewMetrics() async {
+    if (_pendingViewMs.isEmpty) return;
+
+    final batchEntries = Map<String, int>.from(_pendingViewMs);
+    _pendingViewMs.clear();
+
+    final batch = FirebaseFirestore.instance.batch();
+    final postsCollection = FirebaseFirestore.instance.collection('posts');
+
+    batchEntries.forEach((postId, ms) {
+      final docRef = postsCollection.doc(postId);
+      batch.update(docRef, {
+        'viewTimeMs': FieldValue.increment(ms),
+      });
+    });
+
+    try {
+      await batch.commit();
+    } catch (e) {
+      // Restore unsent durations if flush fails so they aren't lost
+      batchEntries.forEach((postId, ms) {
+        _pendingViewMs[postId] = (_pendingViewMs[postId] ?? 0) + ms;
+      });
+      debugPrint('Error flushing view metrics: $e');
+    }
+  }
+
   void _onScroll() {
+    _updateCenteredPostFocus();
+
     // Auto-load more posts when scrolling near the bottom (or approaching the 9th post)
     if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 300) {
       if (!_isLoading && _hasMore) {
@@ -109,6 +278,9 @@ class _FeedPageState extends State<FeedPage> {
 
   Future<void> _fetchPosts({bool reset = false}) async {
     if (reset) {
+      _currentCenteredPostId = null;
+      _centeredSince = null;
+      _postKeys.clear();
       setState(() {
         _posts.clear();
         _lastDocument = null;
@@ -126,23 +298,30 @@ class _FeedPageState extends State<FeedPage> {
       Query query = FirebaseFirestore.instance.collection('posts');
       final now = DateTime.now();
 
-      // Apply time frame or sorting filters
       if (_selectedFilter == 'Newest') {
         query = query.orderBy('timestamp', descending: true);
       } else if (_selectedFilter == 'Past 1 Hour') {
         final timeLimit = now.subtract(const Duration(hours: 1));
-        query = query.where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit)).orderBy('timestamp', descending: true);
+        query = query
+            .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
+            .orderBy('viewTimeMs', descending: true);
       } else if (_selectedFilter == 'Past 12 Hours') {
         final timeLimit = now.subtract(const Duration(hours: 12));
-        query = query.where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit)).orderBy('timestamp', descending: true);
+        query = query
+            .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
+            .orderBy('viewTimeMs', descending: true);
       } else if (_selectedFilter == 'Past Day') {
         final timeLimit = now.subtract(const Duration(days: 1));
-        query = query.where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit)).orderBy('timestamp', descending: true);
+        query = query
+            .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
+            .orderBy('viewTimeMs', descending: true);
       } else if (_selectedFilter == 'Past Week') {
         final timeLimit = now.subtract(const Duration(days: 7));
-        query = query.where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit)).orderBy('timestamp', descending: true);
+        query = query
+            .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
+            .orderBy('viewTimeMs', descending: true);
       } else if (_selectedFilter == 'Hall of Fame') {
-        query = query.orderBy('upvotes', descending: true);
+        query = query.orderBy('viewTimeMs', descending: true);
       }
 
       if (_lastDocument != null) {
@@ -150,7 +329,7 @@ class _FeedPageState extends State<FeedPage> {
       }
 
       query = query.limit(_limit);
-      QuerySnapshot querySnapshot = await query.get();
+      final querySnapshot = await query.get();
 
       if (querySnapshot.docs.length < _limit) {
         _hasMore = false;
@@ -158,8 +337,14 @@ class _FeedPageState extends State<FeedPage> {
 
       if (querySnapshot.docs.isNotEmpty) {
         _lastDocument = querySnapshot.docs.last;
+        for (final doc in querySnapshot.docs) {
+          _postKeys.putIfAbsent(doc.id, () => GlobalKey());
+        }
         setState(() {
           _posts.addAll(querySnapshot.docs);
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _updateCenteredPostFocus();
         });
       } else {
         setState(() {
@@ -175,31 +360,12 @@ class _FeedPageState extends State<FeedPage> {
     }
   }
 
-  void _onFilterChanged(String newFilter) {
+  Future<void> _onFilterChanged(String newFilter) async {
+    _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
+    await _flushViewMetrics();
     setState(() {
       _selectedFilter = newFilter;
     });
-    _fetchPosts(reset: true);
-  }
-
-  Future<void> _handleUpvote(DocumentReference postRef, int currentUpvotes) async {
-    bool verified = await HumanTestDialog.isVerified();
-    if (!verified) {
-      showDialog(
-        context: context,
-        builder: (context) => HumanTestDialog(
-          onSuccess: () {
-            _executeUpvote(postRef, currentUpvotes);
-          },
-        ),
-      );
-    } else {
-      _executeUpvote(postRef, currentUpvotes);
-    }
-  }
-
-  Future<void> _executeUpvote(DocumentReference postRef, int currentUpvotes) async {
-    await postRef.update({'upvotes': currentUpvotes + 1});
     _fetchPosts(reset: true);
   }
 
@@ -210,10 +376,10 @@ class _FeedPageState extends State<FeedPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-            'Trending Now',
+          'Trending Now',
           style: TextStyle(
-            fontSize: 28, // Make it bigger
-            fontWeight: FontWeight.w700, // Apply font weight 700
+            fontSize: 28,
+            fontWeight: FontWeight.w700,
           ),
         ),
         actions: [
@@ -227,10 +393,11 @@ class _FeedPageState extends State<FeedPage> {
       body: Column(
         children: [
           const SizedBox(height: 16),
-          // Centered 'Plus' button to make a post
           Center(
             child: ElevatedButton.icon(
               onPressed: () async {
+                _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
+                await _flushViewMetrics();
                 await Navigator.push(
                   context,
                   MaterialPageRoute(builder: (context) => const MakePostPage()),
@@ -241,7 +408,7 @@ class _FeedPageState extends State<FeedPage> {
               label: const Text('Make a Post'),
               style: ElevatedButton.styleFrom(
                 textStyle: const TextStyle(
-                  fontFamily: 'CormorantGaramond', // Explicitly enforce custom font
+                  fontFamily: 'CormorantGaramond',
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
                 ),
@@ -250,13 +417,12 @@ class _FeedPageState extends State<FeedPage> {
             ),
           ),
           const SizedBox(height: 16),
-          // Time frame filter selector
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
               children: _filters.map((filter) {
-                bool isSelected = _selectedFilter == filter;
+                final isSelected = _selectedFilter == filter;
                 return Padding(
                   padding: const EdgeInsets.only(right: 8.0),
                   child: ChoiceChip(
@@ -274,8 +440,8 @@ class _FeedPageState extends State<FeedPage> {
           ),
           const SizedBox(height: 12),
           const Divider(),
-          // Feed of posts
           Expanded(
+            key: _feedViewportKey,
             child: _posts.isEmpty && _isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : _posts.isEmpty
@@ -296,9 +462,10 @@ class _FeedPageState extends State<FeedPage> {
                 final text = data['text'] as String?;
                 final imageUrl = data['imageUrl'] as String?;
                 final caption = data['caption'] as String?;
-                final upvotes = data['upvotes'] as int? ?? 0;
+                final cardKey = _postKeys.putIfAbsent(doc.id, () => GlobalKey());
 
                 return Center(
+                  key: cardKey,
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 600),
                     child: Card(
@@ -336,21 +503,6 @@ class _FeedPageState extends State<FeedPage> {
                                 ),
                               ],
                             ],
-                            const SizedBox(height: 12),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.thumb_up_alt_outlined),
-                                  color: Colors.blue,
-                                  onPressed: () => _handleUpvote(doc.reference, upvotes),
-                                ),
-                                Text(
-                                  '$upvotes',
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                                ),
-                              ],
-                            ),
                           ],
                         ),
                       ),
