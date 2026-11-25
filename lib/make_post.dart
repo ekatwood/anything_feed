@@ -10,7 +10,7 @@ import 'package:heic_to_png_jpg/heic_to_png_jpg.dart';
 import 'package:web/web.dart' as web;
 
 const int _maxImageDimension = 1080;
-const double _webpQuality = 0.9;
+const double _imageQuality = 0.85;
 const int _maxUploadBytes = 5 * 1024 * 1024;
 
 class MakePostPage extends StatefulWidget {
@@ -29,7 +29,8 @@ class _MakePostPageState extends State<MakePostPage> {
   bool _isPublishing = false;
 
   String? _selectedFileName;
-  Uint8List? _processedWebpBytes;
+  String _processedMimeType = 'image/webp';
+  Uint8List? _processedImageBytes;
   String? _errorMessage;
 
   @override
@@ -129,12 +130,13 @@ class _MakePostPageState extends State<MakePostPage> {
         throw Exception('Could not read image data.');
       }
 
-      final Uint8List webpBytes = await _processImageToWebp(
+      final ({Uint8List bytes, String mimeType}) processed =
+      await _processImage(
         rawBytes: picked.bytes,
         fileName: picked.name,
       );
 
-      if (webpBytes.length > _maxUploadBytes) {
+      if (processed.bytes.length > _maxUploadBytes) {
         throw Exception(
           'Processed image exceeds the 5 MB upload limit.',
         );
@@ -142,16 +144,21 @@ class _MakePostPageState extends State<MakePostPage> {
 
       if (!mounted) return;
       setState(() {
-        _processedWebpBytes = webpBytes;
-        _selectedFileName = _buildWebpFileName(picked.name);
+        _processedImageBytes = processed.bytes;
+        _processedMimeType = processed.mimeType;
+        _selectedFileName = _buildOutputFileName(
+          picked.name,
+          mimeType: processed.mimeType,
+        );
         _isProcessingImage = false;
       });
     } catch (e, stack) {
       debugPrint('Image processing error: $e\n$stack');
       if (!mounted) return;
       setState(() {
-        _processedWebpBytes = null;
+        _processedImageBytes = null;
         _selectedFileName = null;
+        _processedMimeType = 'image/webp';
         _isProcessingImage = false;
         _errorMessage =
         'Could not process image: ${e.toString().replaceFirst('Exception: ', '')}';
@@ -159,7 +166,20 @@ class _MakePostPageState extends State<MakePostPage> {
     }
   }
 
-  String _buildWebpFileName(String originalName) {
+  String _extensionForMimeType(String mimeType) {
+    if (mimeType == 'image/jpeg') return 'jpg';
+    return 'webp';
+  }
+
+  String _labelForMimeType(String mimeType) {
+    if (mimeType == 'image/jpeg') return 'JPEG';
+    return 'WebP';
+  }
+
+  String _buildOutputFileName(
+      String originalName, {
+        required String mimeType,
+      }) {
     final int dotIndex = originalName.lastIndexOf('.');
     final String baseName = dotIndex > 0
         ? originalName.substring(0, dotIndex)
@@ -168,7 +188,8 @@ class _MakePostPageState extends State<MakePostPage> {
         .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_')
         .replaceAll(RegExp(r'_+'), '_');
     final String safeBase = sanitized.isEmpty ? 'image' : sanitized;
-    return '${DateTime.now().millisecondsSinceEpoch}_$safeBase.webp';
+    final String ext = _extensionForMimeType(mimeType);
+    return '${DateTime.now().millisecondsSinceEpoch}_$safeBase.$ext';
   }
 
   bool _isHeicFile(Uint8List bytes, String? fileName) {
@@ -196,7 +217,7 @@ class _MakePostPageState extends State<MakePostPage> {
     return false;
   }
 
-  Future<Uint8List> _processImageToWebp({
+  Future<({Uint8List bytes, String mimeType})> _processImage({
     required Uint8List rawBytes,
     String? fileName,
   }) async {
@@ -212,19 +233,21 @@ class _MakePostPageState extends State<MakePostPage> {
       imageBytesForCanvas = convertedBytes;
     }
 
-    return _resizeAndEncodeCanvasWebp(imageBytesForCanvas);
+    return _resizeAndEncodeCanvas(imageBytesForCanvas);
   }
 
   Future<Uint8List> _convertHeicToBytes(Uint8List rawBytes) async {
     return HeicConverter.convertToJPG(
       heicData: rawBytes,
-      quality: 95,
+      quality: 90,
       maxWidth: _maxImageDimension,
       maxHeight: _maxImageDimension,
     );
   }
 
-  Future<Uint8List> _resizeAndEncodeCanvasWebp(Uint8List bytes) async {
+  Future<({Uint8List bytes, String mimeType})> _resizeAndEncodeCanvas(
+      Uint8List bytes,
+      ) async {
     final web.Blob blob = web.Blob(<JSAny>[bytes.toJS].toJS);
     final String objectUrl = web.URL.createObjectURL(blob);
 
@@ -282,19 +305,29 @@ class _MakePostPageState extends State<MakePostPage> {
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(img, 0, 0, targetW, targetH);
 
-      final String dataUrl = canvas.toDataURL('image/webp', _webpQuality.toJS);
-      const String prefix = 'data:image/webp;base64,';
-      final int commaIndex = dataUrl.indexOf(',');
-      if (commaIndex == -1 || !dataUrl.startsWith('data:image/webp')) {
-        throw Exception('Failed to encode image as WebP.');
+      String dataUrl = canvas.toDataURL('image/webp', _imageQuality.toJS);
+      String mimeType = 'image/webp';
+
+      if (!dataUrl.startsWith('data:image/webp,')) {
+        dataUrl = canvas.toDataURL('image/jpeg', _imageQuality.toJS);
+        mimeType = 'image/jpeg';
       }
 
+      final int commaIndex = dataUrl.indexOf(',');
+      if (commaIndex == -1 || !dataUrl.startsWith('data:$mimeType;base64,')) {
+        throw Exception('Failed to encode resized image.');
+      }
+
+      final String prefix = 'data:$mimeType;base64,';
       final String base64Payload = dataUrl.substring(commaIndex + 1);
       final web.Response dataResponse = await web.window
           .fetch('$prefix$base64Payload'.toJS)
           .toDart;
       final JSArrayBuffer arrayBuffer = await dataResponse.arrayBuffer().toDart;
-      return arrayBuffer.toDart.asUint8List();
+      return (
+      bytes: arrayBuffer.toDart.asUint8List(),
+      mimeType: mimeType,
+      );
     } finally {
       web.URL.revokeObjectURL(objectUrl);
     }
@@ -311,7 +344,7 @@ class _MakePostPageState extends State<MakePostPage> {
       return;
     }
 
-    if (_includeImage && _processedWebpBytes == null) {
+    if (_includeImage && _processedImageBytes == null) {
       setState(() {
         _errorMessage = 'Please select an image first.';
       });
@@ -327,17 +360,18 @@ class _MakePostPageState extends State<MakePostPage> {
       String? imageUrl;
       String? storagePath;
 
-      if (_includeImage && _processedWebpBytes != null) {
+      if (_includeImage && _processedImageBytes != null) {
+        final String fallbackExt = _extensionForMimeType(_processedMimeType);
         final String fileName = _selectedFileName ??
-            '${DateTime.now().millisecondsSinceEpoch}_upload.webp';
+            '${DateTime.now().millisecondsSinceEpoch}_upload.$fallbackExt';
         storagePath = 'post_images/$fileName';
 
         final Reference ref = FirebaseStorage.instance.ref().child(storagePath);
         final SettableMetadata metadata = SettableMetadata(
-          contentType: 'image/webp',
+          contentType: _processedMimeType,
         );
 
-        await ref.putData(_processedWebpBytes!, metadata);
+        await ref.putData(_processedImageBytes!, metadata);
         imageUrl = await ref.getDownloadURL();
       }
 
@@ -368,6 +402,7 @@ class _MakePostPageState extends State<MakePostPage> {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final ColorScheme colorScheme = theme.colorScheme;
+    final String formatLabel = _labelForMimeType(_processedMimeType);
 
     return Scaffold(
       backgroundColor: theme.scaffoldBackgroundColor,
@@ -469,8 +504,8 @@ class _MakePostPageState extends State<MakePostPage> {
                           : const Icon(Icons.upload_file, size: 22),
                       label: Text(
                         _isProcessingImage
-                            ? 'Resizing & Converting to WebP...'
-                            : (_processedWebpBytes == null
+                            ? 'Resizing & Compressing...'
+                            : (_processedImageBytes == null
                             ? 'Choose Photo (HEIC, JPG, PNG, WebP)'
                             : 'Replace Photo'),
                         style: const TextStyle(
@@ -480,20 +515,20 @@ class _MakePostPageState extends State<MakePostPage> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    if (_processedWebpBytes != null) ...<Widget>[
+                    if (_processedImageBytes != null) ...<Widget>[
                       ClipRRect(
                         borderRadius: BorderRadius.circular(8),
                         child: ConstrainedBox(
                           constraints: const BoxConstraints(maxHeight: 420),
                           child: Image.memory(
-                            _processedWebpBytes!,
+                            _processedImageBytes!,
                             fit: BoxFit.contain,
                           ),
                         ),
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Ready as WebP (${(_processedWebpBytes!.length / 1024).toStringAsFixed(0)} KB, max 1080px)',
+                        'Ready as $formatLabel (${(_processedImageBytes!.length / 1024).toStringAsFixed(0)} KB, max 1080px)',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: colorScheme.onSurfaceVariant,
                         ),
