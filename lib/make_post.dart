@@ -4,14 +4,13 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:heic_to_png_jpg/heic_to_png_jpg.dart';
 import 'package:web/web.dart' as web;
 
 const int _maxImageDimension = 1080;
-const double _webpQuality = 0.85;
+const double _webpQuality = 0.9;
 const int _maxUploadBytes = 5 * 1024 * 1024;
 
 class MakePostPage extends StatefulWidget {
@@ -40,6 +39,74 @@ class _MakePostPageState extends State<MakePostPage> {
     super.dispose();
   }
 
+  Future<({String name, Uint8List bytes})?> _pickImageFromBrowser() async {
+    final web.HTMLInputElement input = web.HTMLInputElement()
+      ..type = 'file'
+      ..accept = 'image/*,.heic,.heif';
+
+    final Completer<({String name, Uint8List bytes})?> completer =
+    Completer<({String name, Uint8List bytes})?>();
+    bool settled = false;
+
+    late final JSFunction onChangeFn;
+    late final JSFunction onCancelFn;
+
+    void cleanup() {
+      input.removeEventListener('change', onChangeFn);
+      input.removeEventListener('cancel', onCancelFn);
+    }
+
+    onChangeFn = ((web.Event _) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+
+      final web.FileList? files = input.files;
+      if (files == null || files.length == 0) {
+        if (!completer.isCompleted) completer.complete(null);
+        return;
+      }
+
+      final web.File? file = files.item(0);
+      if (file == null) {
+        if (!completer.isCompleted) completer.complete(null);
+        return;
+      }
+
+      file.arrayBuffer().toDart.then((JSArrayBuffer buffer) {
+        if (!completer.isCompleted) {
+          completer.complete((
+          name: file.name,
+          bytes: buffer.toDart.asUint8List(),
+          ));
+        }
+      }).catchError((Object err, StackTrace stack) {
+        if (!completer.isCompleted) {
+          completer.completeError(err, stack);
+        }
+      });
+    }).toJS;
+
+    onCancelFn = ((web.Event _) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!completer.isCompleted) completer.complete(null);
+    }).toJS;
+
+    input.addEventListener('change', onChangeFn);
+    input.addEventListener('cancel', onCancelFn);
+    input.click();
+
+    return completer.future.timeout(
+      const Duration(minutes: 5),
+      onTimeout: () {
+        cleanup();
+        return null;
+      },
+    );
+  }
+
   Future<void> _pickAndProcessImage() async {
     setState(() {
       _errorMessage = null;
@@ -47,28 +114,24 @@ class _MakePostPageState extends State<MakePostPage> {
     });
 
     try {
-      final FilePickerResult? result = await FilePicker.platform.pickFiles(
-        type: FileType.image,
-        withData: true,
-        allowMultiple: false,
-      );
+      final ({String name, Uint8List bytes})? picked =
+      await _pickImageFromBrowser();
 
-      if (result == null || result.files.isEmpty) {
+      if (picked == null) {
+        if (!mounted) return;
         setState(() {
           _isProcessingImage = false;
         });
         return;
       }
 
-      final PlatformFile pickedFile = result.files.single;
-      final Uint8List? rawBytes = pickedFile.bytes;
-      if (rawBytes == null || rawBytes.isEmpty) {
+      if (picked.bytes.isEmpty) {
         throw Exception('Could not read image data.');
       }
 
       final Uint8List webpBytes = await _processImageToWebp(
-        rawBytes: rawBytes,
-        fileName: pickedFile.name,
+        rawBytes: picked.bytes,
+        fileName: picked.name,
       );
 
       if (webpBytes.length > _maxUploadBytes) {
@@ -80,10 +143,11 @@ class _MakePostPageState extends State<MakePostPage> {
       if (!mounted) return;
       setState(() {
         _processedWebpBytes = webpBytes;
-        _selectedFileName = _buildWebpFileName(pickedFile.name);
+        _selectedFileName = _buildWebpFileName(picked.name);
         _isProcessingImage = false;
       });
-    } catch (e) {
+    } catch (e, stack) {
+      debugPrint('Image processing error: $e\n$stack');
       if (!mounted) return;
       setState(() {
         _processedWebpBytes = null;
@@ -108,31 +172,56 @@ class _MakePostPageState extends State<MakePostPage> {
   }
 
   bool _isHeicFile(Uint8List bytes, String? fileName) {
-    if (HeicConverter.isHeic(bytes)) {
+    final String lower = (fileName ?? '').toLowerCase();
+    if (lower.endsWith('.heic') || lower.endsWith('.heif')) {
       return true;
     }
-    final String lower = (fileName ?? '').toLowerCase();
-    return lower.endsWith('.heic') || lower.endsWith('.heif');
+
+    if (bytes.length >= 12 &&
+        bytes[4] == 0x66 && // 'f'
+        bytes[5] == 0x74 && // 't'
+        bytes[6] == 0x79 && // 'y'
+        bytes[7] == 0x70) {
+      // 'p'
+      final String brand =
+      String.fromCharCodes(bytes.sublist(8, 12)).toLowerCase();
+      return brand == 'heic' ||
+          brand == 'heix' ||
+          brand == 'hevc' ||
+          brand == 'hevx' ||
+          brand == 'mif1' ||
+          brand == 'msf1';
+    }
+
+    return false;
   }
 
   Future<Uint8List> _processImageToWebp({
     required Uint8List rawBytes,
     String? fileName,
   }) async {
+    Uint8List imageBytesForCanvas = rawBytes;
+
     if (_isHeicFile(rawBytes, fileName)) {
-      final Uint8List convertedHeic = await HeicConverter.convertToWebP(
-        heicData: rawBytes,
-        maxWidth: _maxImageDimension,
-        maxHeight: _maxImageDimension,
-        quality: (_webpQuality * 100).round(),
-      );
-      if (convertedHeic.isEmpty) {
-        throw Exception('Failed to decode HEIC image.');
+      final Uint8List convertedBytes = await _convertHeicToBytes(rawBytes);
+      if (convertedBytes.isEmpty || _isHeicFile(convertedBytes, null)) {
+        throw Exception(
+          'Could not convert HEIC image in browser. Please select a JPG, PNG, or WebP photo.',
+        );
       }
-      return convertedHeic;
+      imageBytesForCanvas = convertedBytes;
     }
 
-    return _resizeAndEncodeCanvasWebp(rawBytes);
+    return _resizeAndEncodeCanvasWebp(imageBytesForCanvas);
+  }
+
+  Future<Uint8List> _convertHeicToBytes(Uint8List rawBytes) async {
+    return HeicConverter.convertToJPG(
+      heicData: rawBytes,
+      quality: 95,
+      maxWidth: _maxImageDimension,
+      maxHeight: _maxImageDimension,
+    );
   }
 
   Future<Uint8List> _resizeAndEncodeCanvasWebp(Uint8List bytes) async {
@@ -321,7 +410,6 @@ class _MakePostPageState extends State<MakePostPage> {
                       textStyle: const TextStyle(
                         fontFamily: 'CormorantGaramond',
                         fontSize: 17,
-                        //fontWeight: FontWeight.w700,
                       ),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 14,
@@ -367,7 +455,10 @@ class _MakePostPageState extends State<MakePostPage> {
                           ? null
                           : _pickAndProcessImage,
                       style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 14,
+                        ),
                       ),
                       icon: _isProcessingImage
                           ? const SizedBox(
@@ -383,8 +474,8 @@ class _MakePostPageState extends State<MakePostPage> {
                             ? 'Choose Photo (HEIC, JPG, PNG, WebP)'
                             : 'Replace Photo'),
                         style: const TextStyle(
-                          fontSize: 17,
-                          //fontWeight: FontWeight.w700,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
