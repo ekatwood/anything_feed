@@ -428,159 +428,177 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final isDarkMode = widget.currentThemeMode == ThemeMode.dark;
+    final hasFooterSpinner = _hasMore;
+    final itemCount = _posts.length + (hasFooterSpinner ? 1 : 0);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'Trending Now',
-          style: TextStyle(
-            fontSize: 34,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        actions: [
-          IconButton(
-            icon: Icon(isDarkMode ? Icons.wb_sunny : Icons.nightlight_round),
-            onPressed: () => widget.onThemeChanged(!isDarkMode),
-            tooltip: 'Toggle Theme',
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          const SizedBox(height: 16),
-          Center(
-            child: ElevatedButton.icon(
-              onPressed: () async {
-                _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
-                await _flushViewMetrics();
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const MakePostPage()),
-                );
-                _fetchPosts(reset: true);
-              },
-              icon: const Icon(Icons.add),
-              label: const Text('Make a Post'),
-              style: ElevatedButton.styleFrom(
-                textStyle: const TextStyle(
-                  fontFamily: 'CormorantGaramond',
-                  fontSize: 19,
-                  fontWeight: FontWeight.w700,
-                ),
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      body: CustomScrollView(
+        key: _feedViewportKey,
+        controller: _scrollController,
+        slivers: [
+          SliverAppBar(
+            floating: false,
+            pinned: false,
+            snap: false,
+            title: const Text(
+              'Trending Now',
+              style: TextStyle(
+                fontSize: 34,
+                fontWeight: FontWeight.w700,
               ),
             ),
+            actions: [
+              IconButton(
+                icon: Icon(isDarkMode ? Icons.wb_sunny : Icons.nightlight_round),
+                onPressed: () => widget.onThemeChanged(!isDarkMode),
+                tooltip: 'Toggle Theme',
+              ),
+            ],
           ),
-          const SizedBox(height: 16),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              children: _filters.map((filter) {
-                final isSelected = _selectedFilter == filter;
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8.0),
-                  child: ChoiceChip(
-                    label: Text(
-                      filter,
-                      style: const TextStyle(
-                        fontSize: 17,
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                const SizedBox(height: 16),
+                Center(
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
+                      await _flushViewMetrics();
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => const MakePostPage()),
+                      );
+                      _fetchPosts(reset: true);
+                    },
+                    icon: const Icon(Icons.add),
+                    label: const Text('Make a Post'),
+                    style: ElevatedButton.styleFrom(
+                      textStyle: const TextStyle(
+                        fontFamily: 'CormorantGaramond',
+                        fontSize: 19,
                         fontWeight: FontWeight.w700,
                       ),
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                     ),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    selected: isSelected,
-                    onSelected: (selected) {
-                      if (selected) {
-                        _onFilterChanged(filter);
-                      }
-                    },
                   ),
-                );
-              }).toList(),
+                ),
+                const SizedBox(height: 16),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: _filters.map((filter) {
+                      final isSelected = _selectedFilter == filter;
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 8.0),
+                        child: ChoiceChip(
+                          label: Text(
+                            filter,
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          selected: isSelected,
+                          onSelected: (selected) {
+                            if (selected) {
+                              _onFilterChanged(filter);
+                            }
+                          },
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Divider(),
+              ],
             ),
           ),
-          const SizedBox(height: 12),
-          const Divider(),
-          Expanded(
-            key: _feedViewportKey,
-            child: _posts.isEmpty && _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _posts.isEmpty
-                ? const Center(
-                  child: Text(
-                    'No posts found.',
-                    style: TextStyle(fontSize: 20),
-                  ),
-                )
-                : ListView.builder(
-              controller: _scrollController,
-              itemCount: _posts.length + (_hasMore ? 1 : 0),
-              itemBuilder: (context, index) {
-                if (index == _posts.length) {
-                  return const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 16.0),
-                    child: Center(child: CircularProgressIndicator()),
-                  );
-                }
+          if (_posts.isEmpty && _isLoading)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (_posts.isEmpty)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: Center(
+                child: Text(
+                  'No posts found.',
+                  style: TextStyle(fontSize: 20),
+                ),
+              ),
+            )
+          else
+            SliverList(
+              delegate: SliverChildBuilderDelegate(
+                    (context, index) {
+                  if (index == _posts.length) {
+                    return const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16.0),
+                      child: Center(child: CircularProgressIndicator()),
+                    );
+                  }
 
-                final doc = _posts[index];
-                final data = doc.data() as Map<String, dynamic>;
-                final text = data['text'] as String?;
-                final imageUrl = data['imageUrl'] as String?;
-                final caption = data['caption'] as String?;
-                final cardKey = _postKeys.putIfAbsent(doc.id, () => GlobalKey());
+                  final doc = _posts[index];
+                  final data = doc.data() as Map<String, dynamic>;
+                  final text = data['text'] as String?;
+                  final imageUrl = data['imageUrl'] as String?;
+                  final caption = data['caption'] as String?;
+                  final cardKey = _postKeys.putIfAbsent(doc.id, () => GlobalKey());
 
-                return Center(
-                  key: cardKey,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 600),
-                    child: Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (text != null && text.isNotEmpty) ...[
-                              Text(
-                                text,
-                                style: const TextStyle(fontSize: 21),
-                              ),
-                            ],
-                            if (imageUrl != null && imageUrl.isNotEmpty) ...[
-                              if (text != null && text.isNotEmpty) const SizedBox(height: 12),
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(8),
-                                child: ConstrainedBox(
-                                  constraints: const BoxConstraints(maxHeight: 800),
-                                  child: Image.network(
-                                    imageUrl,
-                                    fit: BoxFit.contain,
-                                  ),
-                                ),
-                              ),
-                              if (caption != null && caption.isNotEmpty) ...[
-                                const SizedBox(height: 8),
+                  return Center(
+                    key: cardKey,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 600),
+                      child: Card(
+                        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (text != null && text.isNotEmpty) ...[
                                 Text(
-                                  caption,
-                                  style: const TextStyle(
-                                    fontStyle: FontStyle.italic,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                                  text,
+                                  style: const TextStyle(fontSize: 21),
                                 ),
                               ],
+                              if (imageUrl != null && imageUrl.isNotEmpty) ...[
+                                if (text != null && text.isNotEmpty) const SizedBox(height: 12),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(maxHeight: 800),
+                                    child: Image.network(
+                                      imageUrl,
+                                      fit: BoxFit.contain,
+                                    ),
+                                  ),
+                                ),
+                                if (caption != null && caption.isNotEmpty) ...[
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    caption,
+                                    style: const TextStyle(
+                                      fontStyle: FontStyle.italic,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ],
-                          ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+                childCount: itemCount,
+              ),
             ),
-          ),
         ],
       ),
     );
