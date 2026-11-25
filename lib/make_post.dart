@@ -366,19 +366,26 @@ class _MakePostPageState extends State<MakePostPage> {
                       onPressed: (_isPublishing || _isProcessingImage)
                           ? null
                           : _pickAndProcessImage,
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                      ),
                       icon: _isProcessingImage
                           ? const SizedBox(
-                        width: 16,
-                        height: 16,
+                        width: 18,
+                        height: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                          : const Icon(Icons.upload_file),
+                          : const Icon(Icons.upload_file, size: 22),
                       label: Text(
                         _isProcessingImage
                             ? 'Resizing & Converting to WebP...'
                             : (_processedWebpBytes == null
                             ? 'Choose Photo (HEIC, JPG, PNG, WebP)'
                             : 'Replace Photo'),
+                        style: const TextStyle(
+                          fontSize: 17,
+                          //fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 12),
