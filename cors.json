@@ -1,0 +1,11 @@
+[
+  {
+    "origin": [
+      "http://localhost:*",
+      "https://anything-feed.web.app",
+      "https://anything-feed.firebaseapp.com"
+    ],
+    "method": ["GET", "HEAD"],
+    "maxAgeSeconds": 3600
+  }
+]

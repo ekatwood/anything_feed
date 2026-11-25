@@ -485,11 +485,12 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                               if (text != null && text.isNotEmpty) const SizedBox(height: 12),
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(8),
-                                child: Image.network(
-                                  imageUrl,
-                                  height: 250,
-                                  width: double.infinity,
-                                  fit: BoxFit.cover,
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(maxHeight: 800),
+                                  child: Image.network(
+                                    imageUrl,
+                                    fit: BoxFit.contain,
+                                  ),
                                 ),
                               ),
                               if (caption != null && caption.isNotEmpty) ...[

@@ -1,38 +1,36 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:js_interop';
 import 'dart:math' as math;
 import 'dart:typed_data';
-// ignore: avoid_web_libraries_in_flutter
-import 'dart:html' as html;
-import 'package:flutter/material.dart';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter/material.dart';
+import 'package:heic_to_png_jpg/heic_to_png_jpg.dart';
+import 'package:web/web.dart' as web;
+
+const int _maxImageDimension = 1080;
+const double _webpQuality = 0.85;
+const int _maxUploadBytes = 5 * 1024 * 1024;
 
 class MakePostPage extends StatefulWidget {
-  const MakePostPage({Key? key}) : super(key: key);
+  const MakePostPage({super.key});
 
   @override
   State<MakePostPage> createState() => _MakePostPageState();
 }
 
 class _MakePostPageState extends State<MakePostPage> {
-  static const double _maxDimension = 1080;
+  final TextEditingController _textController = TextEditingController();
+  final TextEditingController _captionController = TextEditingController();
 
-  // Stubbed Cloud Function endpoint (which loads the Vision API key from Google Secret Manager)
-  static const String _safeSearchCloudFunctionUrl =
-      'https://REGION-PROJECT_ID.cloudfunctions.net/checkSafeSearch';
-
-  final _textController = TextEditingController();
-  final _captionController = TextEditingController();
-
-  Uint8List? _processedWebpBytes;
-  String? _imageName;
-  bool _isImagePost = false;
+  bool _includeImage = false;
   bool _isProcessingImage = false;
-  bool _isLoading = false;
-  bool _isPublished = false;
+  bool _isPublishing = false;
+
+  String? _selectedFileName;
+  Uint8List? _processedWebpBytes;
   String? _errorMessage;
 
   @override
@@ -45,292 +43,382 @@ class _MakePostPageState extends State<MakePostPage> {
   Future<void> _pickAndProcessImage() async {
     setState(() {
       _errorMessage = null;
-    });
-
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-    if (pickedFile == null) return;
-
-    setState(() {
       _isProcessingImage = true;
-      _isImagePost = true;
-      _imageName = _toWebpFileName(pickedFile.name);
     });
 
     try {
-      final rawBytes = await pickedFile.readAsBytes();
-      final webpBytes = await _resizeAndConvertToWebp(rawBytes);
+      final FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        withData: true,
+        allowMultiple: false,
+      );
+
+      if (result == null || result.files.isEmpty) {
+        setState(() {
+          _isProcessingImage = false;
+        });
+        return;
+      }
+
+      final PlatformFile pickedFile = result.files.single;
+      final Uint8List? rawBytes = pickedFile.bytes;
+      if (rawBytes == null || rawBytes.isEmpty) {
+        throw Exception('Could not read image data.');
+      }
+
+      final Uint8List webpBytes = await _processImageToWebp(
+        rawBytes: rawBytes,
+        fileName: pickedFile.name,
+      );
+
+      if (webpBytes.length > _maxUploadBytes) {
+        throw Exception(
+          'Processed image exceeds the 5 MB upload limit.',
+        );
+      }
+
+      if (!mounted) return;
       setState(() {
         _processedWebpBytes = webpBytes;
+        _selectedFileName = _buildWebpFileName(pickedFile.name);
         _isProcessingImage = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _processedWebpBytes = null;
+        _selectedFileName = null;
         _isProcessingImage = false;
-        _errorMessage = 'Could not process image: $e';
+        _errorMessage =
+        'Could not process image: ${e.toString().replaceFirst('Exception: ', '')}';
       });
     }
   }
 
-  String _toWebpFileName(String originalName) {
-    final dotIndex = originalName.lastIndexOf('.');
-    final baseName = dotIndex > 0 ? originalName.substring(0, dotIndex) : originalName;
-    return '$baseName.webp';
+  String _buildWebpFileName(String originalName) {
+    final int dotIndex = originalName.lastIndexOf('.');
+    final String baseName = dotIndex > 0
+        ? originalName.substring(0, dotIndex)
+        : originalName;
+    final String sanitized = baseName
+        .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_')
+        .replaceAll(RegExp(r'_+'), '_');
+    final String safeBase = sanitized.isEmpty ? 'image' : sanitized;
+    return '${DateTime.now().millisecondsSinceEpoch}_$safeBase.webp';
   }
 
-  Future<Uint8List> _resizeAndConvertToWebp(Uint8List sourceBytes) async {
-    final blob = html.Blob([sourceBytes]);
-    final objectUrl = html.Url.createObjectUrlFromBlob(blob);
-    final img = html.ImageElement(src: objectUrl);
-
-    final completer = Completer<void>();
-    img.onLoad.listen((_) => completer.complete());
-    img.onError.listen((_) => completer.completeError('Failed to decode selected image.'));
-    await completer.future;
-    html.Url.revokeObjectUrl(objectUrl);
-
-    final naturalWidth = img.naturalWidth > 0 ? img.naturalWidth.toDouble() : _maxDimension;
-    final naturalHeight = img.naturalHeight > 0 ? img.naturalHeight.toDouble() : _maxDimension;
-
-    final scale = math.min(
-      1.0,
-      math.min(_maxDimension / naturalWidth, _maxDimension / naturalHeight),
-    );
-
-    final targetWidth = math.max(1, (naturalWidth * scale).round());
-    final targetHeight = math.max(1, (naturalHeight * scale).round());
-
-    final canvas = html.CanvasElement(width: targetWidth, height: targetHeight);
-    final ctx = canvas.context2D;
-    ctx.drawImageScaled(img, 0, 0, targetWidth, targetHeight);
-
-    // Encode to WebP at 0.85 quality
-    final dataUrl = canvas.toDataUrl('image/webp', 0.85);
-    final base64Data = dataUrl.split(',').last;
-    return base64Decode(base64Data);
-  }
-
-  Future<bool> _checkSafeSearchViaCloudFunction(Uint8List webpBytes) async {
-    // Stubbed call to Cloud Function (which fetches the API key from Google Secret Manager
-    // and calls Google Cloud Vision SafeSearch).
-    // In production, send a POST request to [_safeSearchCloudFunctionUrl] with base64 image bytes:
-    //
-    // final response = await http.post(
-    //   Uri.parse(_safeSearchCloudFunctionUrl),
-    //   headers: {'Content-Type': 'application/json'},
-    //   body: jsonEncode({'imageBase64': base64Encode(webpBytes)}),
-    // );
-    // if (response.statusCode == 200) {
-    //   final json = jsonDecode(response.body) as Map<String, dynamic>;
-    //   return json['safe'] == true;
-    // }
-    // return false;
-
-    await Future.delayed(const Duration(milliseconds: 600));
-    if (_imageName != null && _imageName!.toLowerCase().contains('unsafe')) {
-      return false;
+  bool _isHeicFile(Uint8List bytes, String? fileName) {
+    if (HeicConverter.isHeic(bytes)) {
+      return true;
     }
-    return true;
+    final String lower = (fileName ?? '').toLowerCase();
+    return lower.endsWith('.heic') || lower.endsWith('.heif');
+  }
+
+  Future<Uint8List> _processImageToWebp({
+    required Uint8List rawBytes,
+    String? fileName,
+  }) async {
+    if (_isHeicFile(rawBytes, fileName)) {
+      final Uint8List convertedHeic = await HeicConverter.convertToWebP(
+        heicData: rawBytes,
+        maxWidth: _maxImageDimension,
+        maxHeight: _maxImageDimension,
+        quality: (_webpQuality * 100).round(),
+      );
+      if (convertedHeic.isEmpty) {
+        throw Exception('Failed to decode HEIC image.');
+      }
+      return convertedHeic;
+    }
+
+    return _resizeAndEncodeCanvasWebp(rawBytes);
+  }
+
+  Future<Uint8List> _resizeAndEncodeCanvasWebp(Uint8List bytes) async {
+    final web.Blob blob = web.Blob(<JSAny>[bytes.toJS].toJS);
+    final String objectUrl = web.URL.createObjectURL(blob);
+
+    final web.HTMLImageElement img = web.HTMLImageElement();
+    final Completer<void> loadCompleter = Completer<void>();
+
+    img.onLoad.listen((_) {
+      if (!loadCompleter.isCompleted) {
+        loadCompleter.complete();
+      }
+    });
+    img.onError.listen((_) {
+      if (!loadCompleter.isCompleted) {
+        loadCompleter.completeError(
+          Exception('Failed to decode selected image.'),
+        );
+      }
+    });
+
+    img.src = objectUrl;
+
+    try {
+      await loadCompleter.future.timeout(
+        const Duration(seconds: 20),
+        onTimeout: () => throw Exception('Timed out while decoding image.'),
+      );
+
+      final int naturalW = img.naturalWidth;
+      final int naturalH = img.naturalHeight;
+      if (naturalW <= 0 || naturalH <= 0) {
+        throw Exception('Invalid image dimensions.');
+      }
+
+      final double scale = math.min(
+        1.0,
+        math.min(
+          _maxImageDimension / naturalW,
+          _maxImageDimension / naturalH,
+        ),
+      );
+      final int targetW = math.max(1, (naturalW * scale).round());
+      final int targetH = math.max(1, (naturalH * scale).round());
+
+      final web.HTMLCanvasElement canvas = web.HTMLCanvasElement()
+        ..width = targetW
+        ..height = targetH;
+
+      final web.CanvasRenderingContext2D? ctx =
+      canvas.getContext('2d') as web.CanvasRenderingContext2D?;
+      if (ctx == null) {
+        throw Exception('Could not initialize image canvas.');
+      }
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+
+      final String dataUrl = canvas.toDataURL('image/webp', _webpQuality.toJS);
+      const String prefix = 'data:image/webp;base64,';
+      final int commaIndex = dataUrl.indexOf(',');
+      if (commaIndex == -1 || !dataUrl.startsWith('data:image/webp')) {
+        throw Exception('Failed to encode image as WebP.');
+      }
+
+      final String base64Payload = dataUrl.substring(commaIndex + 1);
+      final web.Response dataResponse = await web.window
+          .fetch('$prefix$base64Payload'.toJS)
+          .toDart;
+      final JSArrayBuffer arrayBuffer = await dataResponse.arrayBuffer().toDart;
+      return arrayBuffer.toDart.asUint8List();
+    } finally {
+      web.URL.revokeObjectURL(objectUrl);
+    }
   }
 
   Future<void> _publishPost() async {
+    final String textContent = _textController.text.trim();
+    final String captionContent = _captionController.text.trim();
+
+    if (!_includeImage && textContent.isEmpty) {
+      setState(() {
+        _errorMessage = 'Please enter some text before publishing.';
+      });
+      return;
+    }
+
+    if (_includeImage && _processedWebpBytes == null) {
+      setState(() {
+        _errorMessage = 'Please select an image first.';
+      });
+      return;
+    }
+
     setState(() {
-      _isLoading = true;
+      _isPublishing = true;
       _errorMessage = null;
     });
 
     try {
       String? imageUrl;
+      String? storagePath;
 
-      if (_isImagePost) {
-        if (_processedWebpBytes == null) {
-          setState(() {
-            _isLoading = false;
-            _errorMessage = 'Please select an image first.';
-          });
-          return;
-        }
+      if (_includeImage && _processedWebpBytes != null) {
+        final String fileName = _selectedFileName ??
+            '${DateTime.now().millisecondsSinceEpoch}_upload.webp';
+        storagePath = 'post_images/$fileName';
 
-        // 1. Ping SafeSearch via Cloud Function (Secret Manager key lives on backend)
-        final isSafe = await _checkSafeSearchViaCloudFunction(_processedWebpBytes!);
-        if (!isSafe) {
-          setState(() {
-            _isLoading = false;
-            _errorMessage = 'Image did not pass Google SafeSearch check and was not uploaded.';
-          });
-          return;
-        }
+        final Reference ref = FirebaseStorage.instance.ref().child(storagePath);
+        final SettableMetadata metadata = SettableMetadata(
+          contentType: 'image/webp',
+        );
 
-        // 2. Upload converted WebP image to Firebase Storage bucket
-        final safeFileName = _imageName ?? 'upload.webp';
-        final storageRef = FirebaseStorage.instance
-            .ref()
-            .child('post_images/${DateTime.now().millisecondsSinceEpoch}_$safeFileName');
-        final metadata = SettableMetadata(contentType: 'image/webp');
-        final uploadTask = await storageRef.putData(_processedWebpBytes!, metadata);
-        imageUrl = await uploadTask.ref.getDownloadURL();
-      } else {
-        if (_textController.text.trim().isEmpty) {
-          setState(() {
-            _isLoading = false;
-            _errorMessage = 'Please enter text or upload an image.';
-          });
-          return;
-        }
+        await ref.putData(_processedWebpBytes!, metadata);
+        imageUrl = await ref.getDownloadURL();
       }
 
-      // 3. Save post metadata to Firestore
-      await FirebaseFirestore.instance.collection('posts').add({
-        'text': _isImagePost ? null : _textController.text.trim(),
+      final Map<String, dynamic> postData = <String, dynamic>{
+        'type': _includeImage ? 'image' : 'text',
+        'text': _includeImage ? captionContent : textContent,
         'imageUrl': imageUrl,
-        'caption': _isImagePost ? _captionController.text.trim() : null,
-        'viewTimeMs': 0,
+        'storagePath': storagePath,
         'timestamp': FieldValue.serverTimestamp(),
-      });
+        'viewTimeMs': 0,
+      };
 
-      setState(() {
-        _isLoading = false;
-        _isPublished = true;
-      });
+      await FirebaseFirestore.instance.collection('posts').add(postData);
+
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
     } catch (e) {
+      if (!mounted) return;
       setState(() {
-        _isLoading = false;
-        _errorMessage = 'Error publishing post: $e';
+        _isPublishing = false;
+        _errorMessage =
+        'Error publishing post: ${e.toString().replaceFirst('Exception: ', '')}';
       });
     }
   }
 
-  void _resetForm() {
-    setState(() {
-      _textController.clear();
-      _captionController.clear();
-      _processedWebpBytes = null;
-      _imageName = null;
-      _isImagePost = false;
-      _isProcessingImage = false;
-      _isPublished = false;
-      _errorMessage = null;
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme colorScheme = theme.colorScheme;
+
     return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: const Text('Create Post'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(24.0),
+      backgroundColor: theme.scaffoldBackgroundColor,
+      body: SafeArea(
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 600),
-            child: _isPublished
-                ? Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Text(
-                  'Published!',
-                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.green),
-                ),
-                const SizedBox(height: 24),
-                ElevatedButton(
-                  onPressed: _resetForm,
-                  child: const Text('Make another post'),
-                ),
-              ],
-            )
-                : SingleChildScrollView(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
+                children: <Widget>[
                   Row(
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: _isLoading
-                            ? null
-                            : () => setState(() {
-                          _isImagePost = false;
-                          _errorMessage = null;
-                        }),
-                        icon: const Icon(Icons.text_fields),
-                        label: const Text('Text Post'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: !_isImagePost ? Theme.of(context).primaryColor : Colors.grey[300],
-                          foregroundColor: !_isImagePost ? Colors.white : Colors.black,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: <Widget>[
+                      Text(
+                        'New Post',
+                        style: theme.textTheme.headlineMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      ElevatedButton.icon(
-                        onPressed: _isLoading ? null : _pickAndProcessImage,
-                        icon: const Icon(Icons.image),
-                        label: Text(_imageName == null ? 'Upload Picture' : 'Change Picture'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: _isImagePost ? Theme.of(context).primaryColor : Colors.grey[300],
-                          foregroundColor: _isImagePost ? Colors.white : Colors.black,
-                        ),
+                      TextButton.icon(
+                        onPressed: _isPublishing
+                            ? null
+                            : () => Navigator.of(context).pop(false),
+                        icon: const Icon(Icons.close, size: 18),
+                        label: const Text('Cancel'),
                       ),
                     ],
                   ),
                   const SizedBox(height: 20),
-                  if (!_isImagePost) ...[
+                  SegmentedButton<bool>(
+                    segments: const <ButtonSegment<bool>>[
+                      ButtonSegment<bool>(
+                        value: false,
+                        label: Text('Text Post'),
+                        icon: Icon(Icons.notes),
+                      ),
+                      ButtonSegment<bool>(
+                        value: true,
+                        label: Text('Image Post'),
+                        icon: Icon(Icons.image_outlined),
+                      ),
+                    ],
+                    selected: <bool>{_includeImage},
+                    onSelectionChanged: _isPublishing
+                        ? null
+                        : (Set<bool> selection) {
+                      setState(() {
+                        _includeImage = selection.first;
+                        _errorMessage = null;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 20),
+                  if (!_includeImage) ...<Widget>[
                     TextField(
                       controller: _textController,
-                      maxLength: 800,
                       maxLines: 6,
+                      enabled: !_isPublishing,
                       decoration: const InputDecoration(
-                        labelText: 'Write your post (up to 800 characters)',
+                        hintText: 'What is trending on your mind?',
                         border: OutlineInputBorder(),
                       ),
                     ),
-                  ] else ...[
-                    if (_isProcessingImage) ...[
-                      const SizedBox(
-                        height: 200,
-                        child: Center(child: CircularProgressIndicator()),
+                  ] else ...<Widget>[
+                    OutlinedButton.icon(
+                      onPressed: (_isPublishing || _isProcessingImage)
+                          ? null
+                          : _pickAndProcessImage,
+                      icon: _isProcessingImage
+                          ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                          : const Icon(Icons.upload_file),
+                      label: Text(
+                        _isProcessingImage
+                            ? 'Resizing & Converting to WebP...'
+                            : (_processedWebpBytes == null
+                            ? 'Choose Photo (HEIC, JPG, PNG, WebP)'
+                            : 'Replace Photo'),
                       ),
-                      const SizedBox(height: 16),
-                    ] else if (_processedWebpBytes != null) ...[
-                      Container(
-                        height: 200,
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey),
-                          image: DecorationImage(
-                            image: MemoryImage(_processedWebpBytes!),
-                            fit: BoxFit.cover,
+                    ),
+                    const SizedBox(height: 12),
+                    if (_processedWebpBytes != null) ...<Widget>[
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxHeight: 420),
+                          child: Image.memory(
+                            _processedWebpBytes!,
+                            fit: BoxFit.contain,
                           ),
                         ),
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Ready as WebP (${(_processedWebpBytes!.length / 1024).toStringAsFixed(0)} KB, max 1080px)',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
                     ],
                     TextField(
                       controller: _captionController,
-                      maxLength: 300,
+                      maxLines: 3,
+                      enabled: !_isPublishing,
                       decoration: const InputDecoration(
-                        labelText: 'Optional caption (max 300 characters)',
+                        hintText: 'Optional caption...',
                         border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                  if (_errorMessage != null) ...<Widget>[
+                    const SizedBox(height: 16),
+                    Text(
+                      _errorMessage!,
+                      style: TextStyle(
+                        color: colorScheme.error,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ],
                   const SizedBox(height: 24),
-                  if (_errorMessage != null) ...[
-                    Text(
-                      _errorMessage!,
-                      style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  SizedBox(
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: (_isLoading || _isProcessingImage) ? null : _publishPost,
-                      child: _isLoading
-                          ? const CircularProgressIndicator(color: Colors.white)
-                          : const Text('Publish', style: TextStyle(fontSize: 18)),
+                  FilledButton(
+                    onPressed: (_isPublishing || _isProcessingImage)
+                        ? null
+                        : _publishPost,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: _isPublishing
+                          ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                          : const Text('Publish'),
                     ),
                   ),
                 ],
