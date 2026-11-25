@@ -304,13 +304,30 @@ class _MakePostPageState extends State<MakePostPage> {
                         onPressed: _isPublishing
                             ? null
                             : () => Navigator.of(context).pop(false),
-                        icon: const Icon(Icons.close, size: 18),
-                        label: const Text('Cancel'),
+                        icon: const Icon(Icons.close, size: 20),
+                        label: const Text(
+                          'Cancel',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 20),
                   SegmentedButton<bool>(
+                    style: SegmentedButton.styleFrom(
+                      textStyle: const TextStyle(
+                        fontFamily: 'CormorantGaramond',
+                        fontSize: 17,
+                        //fontWeight: FontWeight.w700,
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                    ),
                     segments: const <ButtonSegment<bool>>[
                       ButtonSegment<bool>(
                         value: false,
@@ -418,7 +435,13 @@ class _MakePostPageState extends State<MakePostPage> {
                         height: 20,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                          : const Text('Publish'),
+                          : const Text(
+                        'Publish',
+                        style: TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
                     ),
                   ),
                 ],

@@ -37,20 +37,76 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
       bodyMedium: TextStyle(fontSize: 18),
       bodySmall: TextStyle(fontSize: 16),
     );
+    const Color _lightRedSeed = Color(0xFFE57373); // soft/light red (Material Red 300)
+    const Color _lightRedSurface = Color(0xFFFFF5F5); // subtle blush tint for background
+    const Color _lightRedCard = Color(0xFFFFFAFA); // clean soft-rose card surface
+    const Color _darkRedSeed = Color(0xFFEF9A9A); // gentle coral-red for dark mode
+
+    final lightColorScheme = ColorScheme.fromSeed(
+      seedColor: _lightRedSeed,
+      brightness: Brightness.light,
+    );
+
+    final darkColorScheme = ColorScheme.fromSeed(
+      seedColor: _darkRedSeed,
+      brightness: Brightness.dark,
+    );
     return MaterialApp(
       title: 'Trending Now',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        primarySwatch: Colors.blue,
+        useMaterial3: true,
+        colorScheme: lightColorScheme,
         brightness: Brightness.light,
+        scaffoldBackgroundColor: _lightRedSurface,
         fontFamily: 'CormorantGaramond',
         textTheme: baseTextTheme,
+        tooltipTheme: const TooltipThemeData(
+          textStyle: TextStyle(
+            fontFamily: 'CormorantGaramond',
+            fontSize: 17,
+            color: Colors.white,
+          ),
+        ),
+        appBarTheme: AppBarTheme(
+          backgroundColor: lightColorScheme.primaryContainer,
+          foregroundColor: lightColorScheme.onPrimaryContainer,
+          elevation: 0,
+        ),
+        cardTheme: CardThemeData(
+          color: _lightRedCard,
+          surfaceTintColor: lightColorScheme.primary,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: lightColorScheme.primaryContainer,
+            foregroundColor: lightColorScheme.onPrimaryContainer,
+            textStyle: const TextStyle(
+              fontFamily: 'CormorantGaramond',
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          ),
+        ),
+        chipTheme: ChipThemeData(
+          selectedColor: lightColorScheme.primaryContainer,
+          labelStyle: const TextStyle(fontFamily: 'CormorantGaramond'),
+        ),
       ),
       darkTheme: ThemeData(
+        useMaterial3: true,
+        colorScheme: darkColorScheme,
         brightness: Brightness.dark,
-        primarySwatch: Colors.blue,
         fontFamily: 'CormorantGaramond',
         textTheme: baseTextTheme,
+        tooltipTheme: const TooltipThemeData(
+          textStyle: TextStyle(
+            fontFamily: 'CormorantGaramond',
+            fontSize: 17,
+            color: Colors.black,
+          ),
+        ),
       ),
       themeMode: _themeMode,
       home: FeedPage(onThemeChanged: _toggleTheme, currentThemeMode: _themeMode),
@@ -378,7 +434,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         title: const Text(
           'Trending Now',
           style: TextStyle(
-            fontSize: 28,
+            fontSize: 34,
             fontWeight: FontWeight.w700,
           ),
         ),
@@ -409,8 +465,8 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
               style: ElevatedButton.styleFrom(
                 textStyle: const TextStyle(
                   fontFamily: 'CormorantGaramond',
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w700,
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
               ),
@@ -426,7 +482,14 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                 return Padding(
                   padding: const EdgeInsets.only(right: 8.0),
                   child: ChoiceChip(
-                    label: Text(filter),
+                    label: Text(
+                      filter,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     selected: isSelected,
                     onSelected: (selected) {
                       if (selected) {
@@ -445,7 +508,12 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
             child: _posts.isEmpty && _isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : _posts.isEmpty
-                ? const Center(child: Text('No posts found.'))
+                ? const Center(
+                  child: Text(
+                    'No posts found.',
+                    style: TextStyle(fontSize: 20),
+                  ),
+                )
                 : ListView.builder(
               controller: _scrollController,
               itemCount: _posts.length + (_hasMore ? 1 : 0),
@@ -478,7 +546,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                             if (text != null && text.isNotEmpty) ...[
                               Text(
                                 text,
-                                style: const TextStyle(fontSize: 16),
+                                style: const TextStyle(fontSize: 21),
                               ),
                             ],
                             if (imageUrl != null && imageUrl.isNotEmpty) ...[
