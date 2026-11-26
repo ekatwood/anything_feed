@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -6,12 +7,22 @@ import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:heic_to_png_jpg/heic_to_png_jpg.dart';
+import 'package:http/http.dart' as http;
 import 'package:web/web.dart' as web;
 
 const int _maxImageDimension = 1080;
 const double _imageQuality = 0.85;
 const int _maxUploadBytes = 5 * 1024 * 1024;
+const int _maxTextChars = 800;
+const int _maxCaptionChars = 300;
+const String _safeSearchEndpoint = '';
+
+// Aspect ratio bounds (width / height):
+// 4:5 (0.8) prevents overly tall portrait photos; 5:4 (1.25) prevents overly wide landscape photos.
+const double _minAspectRatio = 4 / 5;
+const double _maxAspectRatio = 5 / 4;
 
 class MakePostPage extends StatefulWidget {
   const MakePostPage({super.key});
@@ -27,6 +38,7 @@ class _MakePostPageState extends State<MakePostPage> {
   bool _includeImage = false;
   bool _isProcessingImage = false;
   bool _isPublishing = false;
+  bool _isPublished = false;
 
   String? _selectedFileName;
   String _processedMimeType = 'image/webp';
@@ -34,10 +46,40 @@ class _MakePostPageState extends State<MakePostPage> {
   String? _errorMessage;
 
   @override
+  void initState() {
+    super.initState();
+    _textController.addListener(_onFormChanged);
+    _captionController.addListener(_onFormChanged);
+  }
+
+  void _onFormChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
   void dispose() {
+    _textController.removeListener(_onFormChanged);
+    _captionController.removeListener(_onFormChanged);
     _textController.dispose();
     _captionController.dispose();
     super.dispose();
+  }
+
+  void _resetForAnotherPost() {
+    _textController.clear();
+    _captionController.clear();
+    setState(() {
+      _includeImage = false;
+      _isProcessingImage = false;
+      _isPublishing = false;
+      _isPublished = false;
+      _selectedFileName = null;
+      _processedMimeType = 'image/webp';
+      _processedImageBytes = null;
+      _errorMessage = null;
+    });
   }
 
   Future<({String name, Uint8List bytes})?> _pickImageFromBrowser() async {
@@ -137,9 +179,7 @@ class _MakePostPageState extends State<MakePostPage> {
       );
 
       if (processed.bytes.length > _maxUploadBytes) {
-        throw Exception(
-          'Processed image exceeds the 5 MB upload limit.',
-        );
+        throw Exception('Processed image exceeds the 5 MB upload limit.');
       }
 
       if (!mounted) return;
@@ -171,19 +211,13 @@ class _MakePostPageState extends State<MakePostPage> {
     return 'webp';
   }
 
-  String _labelForMimeType(String mimeType) {
-    if (mimeType == 'image/jpeg') return 'JPEG';
-    return 'WebP';
-  }
-
   String _buildOutputFileName(
       String originalName, {
         required String mimeType,
       }) {
     final int dotIndex = originalName.lastIndexOf('.');
-    final String baseName = dotIndex > 0
-        ? originalName.substring(0, dotIndex)
-        : originalName;
+    final String baseName =
+    dotIndex > 0 ? originalName.substring(0, dotIndex) : originalName;
     final String sanitized = baseName
         .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_')
         .replaceAll(RegExp(r'_+'), '_');
@@ -281,15 +315,30 @@ class _MakePostPageState extends State<MakePostPage> {
         throw Exception('Invalid image dimensions.');
       }
 
+      // Center-crop if the image is taller than 4:5 or wider than 5:4.
+      double srcX = 0;
+      double srcY = 0;
+      double srcW = naturalW.toDouble();
+      double srcH = naturalH.toDouble();
+      final double aspect = srcW / srcH;
+
+      if (aspect < _minAspectRatio) {
+        srcH = srcW / _minAspectRatio;
+        srcY = (naturalH - srcH) / 2;
+      } else if (aspect > _maxAspectRatio) {
+        srcW = srcH * _maxAspectRatio;
+        srcX = (naturalW - srcW) / 2;
+      }
+
       final double scale = math.min(
         1.0,
         math.min(
-          _maxImageDimension / naturalW,
-          _maxImageDimension / naturalH,
+          _maxImageDimension / srcW,
+          _maxImageDimension / srcH,
         ),
       );
-      final int targetW = math.max(1, (naturalW * scale).round());
-      final int targetH = math.max(1, (naturalH * scale).round());
+      final int targetW = math.max(1, (srcW * scale).round());
+      final int targetH = math.max(1, (srcH * scale).round());
 
       final web.HTMLCanvasElement canvas = web.HTMLCanvasElement()
         ..width = targetW
@@ -303,7 +352,17 @@ class _MakePostPageState extends State<MakePostPage> {
 
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, 0, 0, targetW, targetH);
+      ctx.drawImage(
+        img,
+        srcX,
+        srcY,
+        srcW,
+        srcH,
+        0,
+        0,
+        targetW.toDouble(),
+        targetH.toDouble(),
+      );
 
       String dataUrl = canvas.toDataURL('image/webp', _imageQuality.toJS);
       String mimeType = 'image/webp';
@@ -333,22 +392,72 @@ class _MakePostPageState extends State<MakePostPage> {
     }
   }
 
+  Future<void> _validateImageSafeSearch({
+    required Uint8List bytes,
+    required String mimeType,
+  }) async {
+    if (_safeSearchEndpoint.trim().isEmpty) {
+      return;
+    }
+
+    final response = await http.post(
+      Uri.parse(_safeSearchEndpoint.trim()),
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'imageBase64': base64Encode(bytes),
+        'mimeType': mimeType,
+      }),
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Image safety check failed (${response.statusCode}).');
+    }
+
+    if (response.body.isNotEmpty) {
+      final dynamic decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        final bool isSafe = decoded['safe'] as bool? ?? true;
+        if (!isSafe) {
+          final String reason = decoded['reason'] as String? ??
+              'Image did not pass SafeSearch validation.';
+          throw Exception(reason);
+        }
+      }
+    }
+  }
+
   Future<void> _publishPost() async {
     final String textContent = _textController.text.trim();
     final String captionContent = _captionController.text.trim();
 
-    if (!_includeImage && textContent.isEmpty) {
-      setState(() {
-        _errorMessage = 'Please enter some text before publishing.';
-      });
-      return;
-    }
-
-    if (_includeImage && _processedImageBytes == null) {
-      setState(() {
-        _errorMessage = 'Please select an image first.';
-      });
-      return;
+    if (!_includeImage) {
+      if (textContent.isEmpty) {
+        setState(() {
+          _errorMessage = 'Please enter some text before publishing.';
+        });
+        return;
+      }
+      if (textContent.length > _maxTextChars) {
+        setState(() {
+          _errorMessage =
+          'Text posts must be $_maxTextChars characters or fewer.';
+        });
+        return;
+      }
+    } else {
+      if (_processedImageBytes == null) {
+        setState(() {
+          _errorMessage = 'Please select an image first.';
+        });
+        return;
+      }
+      if (captionContent.length > _maxCaptionChars) {
+        setState(() {
+          _errorMessage =
+          'Captions must be $_maxCaptionChars characters or fewer.';
+        });
+        return;
+      }
     }
 
     setState(() {
@@ -361,6 +470,11 @@ class _MakePostPageState extends State<MakePostPage> {
       String? storagePath;
 
       if (_includeImage && _processedImageBytes != null) {
+        await _validateImageSafeSearch(
+          bytes: _processedImageBytes!,
+          mimeType: _processedMimeType,
+        );
+
         final String fallbackExt = _extensionForMimeType(_processedMimeType);
         final String fileName = _selectedFileName ??
             '${DateTime.now().millisecondsSinceEpoch}_upload.$fallbackExt';
@@ -387,7 +501,10 @@ class _MakePostPageState extends State<MakePostPage> {
       await FirebaseFirestore.instance.collection('posts').add(postData);
 
       if (!mounted) return;
-      Navigator.of(context).pop(true);
+      setState(() {
+        _isPublishing = false;
+        _isPublished = true;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -402,7 +519,8 @@ class _MakePostPageState extends State<MakePostPage> {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final ColorScheme colorScheme = theme.colorScheme;
-    final String formatLabel = _labelForMimeType(_processedMimeType);
+    final int textLength = _textController.text.length;
+    final int captionLength = _captionController.text.length;
 
     return Scaffold(
       backgroundColor: theme.scaffoldBackgroundColor,
@@ -412,31 +530,69 @@ class _MakePostPageState extends State<MakePostPage> {
             constraints: const BoxConstraints(maxWidth: 600),
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-              child: Column(
+              child: _isPublished
+                  ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.start,
+                    children: <Widget>[
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(true),
+                        icon: const Icon(Icons.arrow_back),
+                        tooltip: 'Back',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 36),
+                  Icon(
+                    Icons.check_circle_outline,
+                    size: 48,
+                    color: colorScheme.primary,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Published!',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.headlineLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  FilledButton.icon(
+                    onPressed: _resetForAnotherPost,
+                    icon: const Icon(Icons.add),
+                    label: const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        'Make another post',
+                        style: TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              )
+                  : Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: <Widget>[
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(true),
+                        icon: const Icon(Icons.arrow_back),
+                        tooltip: 'Back',
+                      ),
                       Text(
                         'New Post',
                         style: theme.textTheme.headlineMedium?.copyWith(
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      TextButton.icon(
-                        onPressed: _isPublishing
-                            ? null
-                            : () => Navigator.of(context).pop(false),
-                        icon: const Icon(Icons.close, size: 20),
-                        label: const Text(
-                          'Cancel',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
+                      const SizedBox(width: 48),
                     ],
                   ),
                   const SizedBox(height: 20),
@@ -478,10 +634,24 @@ class _MakePostPageState extends State<MakePostPage> {
                     TextField(
                       controller: _textController,
                       maxLines: 6,
+                      maxLength: _maxTextChars,
+                      maxLengthEnforcement:
+                      MaxLengthEnforcement.enforced,
                       enabled: !_isPublishing,
                       decoration: const InputDecoration(
-                        hintText: 'What is trending on your mind?',
+                        hintText: 'Up to 800 characters',
                         border: OutlineInputBorder(),
+                        counterText: '',
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        '$textLength / $_maxTextChars',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ),
                   ] else ...<Widget>[
@@ -499,49 +669,61 @@ class _MakePostPageState extends State<MakePostPage> {
                           ? const SizedBox(
                         width: 18,
                         height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
                       )
                           : const Icon(Icons.upload_file, size: 22),
                       label: Text(
                         _isProcessingImage
-                            ? 'Resizing & Compressing...'
+                            ? ''
                             : (_processedImageBytes == null
-                            ? 'Choose Photo (HEIC, JPG, PNG, WebP)'
-                            : 'Replace Photo'),
+                            ? 'Choose Image'
+                            : 'Replace Image'),
                         style: const TextStyle(
                           fontSize: 18,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                     ),
                     const SizedBox(height: 12),
                     if (_processedImageBytes != null) ...<Widget>[
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxHeight: 420),
-                          child: Image.memory(
-                            _processedImageBytes!,
-                            fit: BoxFit.contain,
+                      Center(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: ConstrainedBox(
+                            constraints:
+                            const BoxConstraints(maxHeight: 420),
+                            child: Image.memory(
+                              _processedImageBytes!,
+                              fit: BoxFit.contain,
+                            ),
                           ),
                         ),
                       ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Ready as $formatLabel (${(_processedImageBytes!.length / 1024).toStringAsFixed(0)} KB, max 1080px)',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 16),
                     ],
                     TextField(
                       controller: _captionController,
                       maxLines: 3,
+                      maxLength: _maxCaptionChars,
+                      maxLengthEnforcement:
+                      MaxLengthEnforcement.enforced,
                       enabled: !_isPublishing,
                       decoration: const InputDecoration(
-                        hintText: 'Optional caption...',
+                        hintText: 'Optional caption up to 300 characters',
                         border: OutlineInputBorder(),
+                        counterText: '',
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        '$captionLength / $_maxCaptionChars',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ),
                   ],
@@ -566,7 +748,9 @@ class _MakePostPageState extends State<MakePostPage> {
                           ? const SizedBox(
                         width: 20,
                         height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
                       )
                           : const Text(
                         'Publish',

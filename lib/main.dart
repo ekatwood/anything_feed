@@ -34,8 +34,8 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
   Widget build(BuildContext context) {
     const baseTextTheme = TextTheme(
       bodyLarge: TextStyle(fontSize: 21),
-      bodyMedium: TextStyle(fontSize: 18),
-      bodySmall: TextStyle(fontSize: 16),
+      bodyMedium: TextStyle(fontSize: 19),
+      bodySmall: TextStyle(fontSize: 17),
     );
     const Color _lightRedSeed = Color(0xFFE57373); // soft/light red (Material Red 300)
     const Color _lightRedSurface = Color(0xFFFFF5F5); // subtle blush tint for background
