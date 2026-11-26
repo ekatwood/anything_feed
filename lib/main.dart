@@ -128,6 +128,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   static const int _minDwellMs = 3000; // 3-second lower bound
   static const int _maxStretchMs = 30000; // 30-second cap per centered stretch
   static const Duration _flushInterval = Duration(seconds: 150); // 2.5 minutes
+  static const Duration _imageLoadTimeout = Duration(seconds: 8);
 
   String _selectedFilter = 'Newest';
   final List<String> _filters = [
@@ -144,6 +145,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   bool _hasMore = true;
   DocumentSnapshot? _lastDocument;
   final int _limit = 10;
+  int _fetchGeneration = 0;
 
   final ScrollController _scrollController = ScrollController();
   final GlobalKey _feedViewportKey = GlobalKey();
@@ -332,8 +334,32 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _precacheBatchImages(List<DocumentSnapshot> docs) async {
+    if (!mounted) return;
+
+    final List<Future<void>> futures = <Future<void>>[];
+    for (final doc in docs) {
+      final data = doc.data() as Map<String, dynamic>?;
+      final imageUrl = data?['imageUrl'] as String?;
+      if (imageUrl != null && imageUrl.isNotEmpty) {
+        futures.add(
+          precacheImage(NetworkImage(imageUrl), context)
+              .timeout(_imageLoadTimeout)
+              .catchError((Object err) {
+            debugPrint('Image precache warning for $imageUrl: $err');
+          }),
+        );
+      }
+    }
+
+    if (futures.isNotEmpty) {
+      await Future.wait(futures);
+    }
+  }
+
   Future<void> _fetchPosts({bool reset = false}) async {
     if (reset) {
+      _fetchGeneration++;
       _currentCenteredPostId = null;
       _centeredSince = null;
       _postKeys.clear();
@@ -341,11 +367,13 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         _posts.clear();
         _lastDocument = null;
         _hasMore = true;
+        _isLoading = false;
       });
     }
 
     if (_isLoading || !_hasMore) return;
 
+    final int generation = _fetchGeneration;
     setState(() {
       _isLoading = true;
     });
@@ -386,10 +414,12 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
 
       query = query.limit(_limit);
       final querySnapshot = await query.get();
+      if (!mounted || generation != _fetchGeneration) return;
 
-      if (querySnapshot.docs.length < _limit) {
-        _hasMore = false;
-      }
+      await _precacheBatchImages(querySnapshot.docs);
+      if (!mounted || generation != _fetchGeneration) return;
+
+      final bool reachedEnd = querySnapshot.docs.length < _limit;
 
       if (querySnapshot.docs.isNotEmpty) {
         _lastDocument = querySnapshot.docs.last;
@@ -398,6 +428,8 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         }
         setState(() {
           _posts.addAll(querySnapshot.docs);
+          _hasMore = !reachedEnd;
+          _isLoading = false;
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _updateCenteredPostFocus();
@@ -405,14 +437,16 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
       } else {
         setState(() {
           _hasMore = false;
+          _isLoading = false;
         });
       }
     } catch (e) {
       debugPrint('Error fetching posts: $e');
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted && generation == _fetchGeneration) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -546,7 +580,8 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                   final data = doc.data() as Map<String, dynamic>;
                   final text = data['text'] as String?;
                   final imageUrl = data['imageUrl'] as String?;
-                  final caption = data['caption'] as String?;
+                  final caption = (data['caption'] as String?) ?? text;
+                  final hasImage = imageUrl != null && imageUrl.isNotEmpty;
                   final cardKey = _postKeys.putIfAbsent(doc.id, () => GlobalKey());
 
                   return Center(
@@ -560,14 +595,13 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              if (text != null && text.isNotEmpty) ...[
+                              if (!hasImage && text != null && text.isNotEmpty) ...[
                                 Text(
                                   text,
                                   style: const TextStyle(fontSize: 21),
                                 ),
                               ],
-                              if (imageUrl != null && imageUrl.isNotEmpty) ...[
-                                if (text != null && text.isNotEmpty) const SizedBox(height: 12),
+                              if (hasImage) ...[
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
                                   child: ConstrainedBox(
@@ -583,8 +617,9 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                                   Text(
                                     caption,
                                     style: const TextStyle(
+                                      fontSize: 19,
                                       fontStyle: FontStyle.italic,
-                                      fontWeight: FontWeight.bold,
+                                      fontWeight: FontWeight.w700,
                                     ),
                                   ),
                                 ],
