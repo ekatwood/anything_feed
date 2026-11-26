@@ -19,10 +19,8 @@ const int _maxTextChars = 800;
 const int _maxCaptionChars = 300;
 const String _safeSearchEndpoint = '';
 
-// Aspect ratio bounds (width / height):
-// 4:5 (0.8) prevents overly tall portrait photos; 5:4 (1.25) prevents overly wide landscape photos.
+// Minimum aspect ratio (width / height): 4:5 (0.8) prevents overly tall portrait photos.
 const double _minAspectRatio = 4 / 5;
-const double _maxAspectRatio = 5 / 4;
 
 class MakePostPage extends StatefulWidget {
   const MakePostPage({super.key});
@@ -315,19 +313,16 @@ class _MakePostPageState extends State<MakePostPage> {
         throw Exception('Invalid image dimensions.');
       }
 
-      // Center-crop if the image is taller than 4:5 or wider than 5:4.
       double srcX = 0;
       double srcY = 0;
       double srcW = naturalW.toDouble();
       double srcH = naturalH.toDouble();
       final double aspect = srcW / srcH;
 
+      // Only crop vertically when the image is taller than 4:5.
       if (aspect < _minAspectRatio) {
         srcH = srcW / _minAspectRatio;
         srcY = (naturalH - srcH) / 2;
-      } else if (aspect > _maxAspectRatio) {
-        srcW = srcH * _maxAspectRatio;
-        srcX = (naturalW - srcW) / 2;
       }
 
       final double scale = math.min(
@@ -690,7 +685,7 @@ class _MakePostPageState extends State<MakePostPage> {
                     if (_processedImageBytes != null) ...<Widget>[
                       Center(
                         child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
+                          borderRadius: BorderRadius.circular(16),
                           child: ConstrainedBox(
                             constraints:
                             const BoxConstraints(maxHeight: 420),
