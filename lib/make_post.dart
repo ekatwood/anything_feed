@@ -177,6 +177,7 @@ class _MakePostPageState extends State<MakePostPage> {
                     maxLines: 6,
                     maxLength: _maxTextChars,
                     maxLengthEnforcement: MaxLengthEnforcement.enforced,
+                    textCapitalization: TextCapitalization.sentences,
                     enabled: !_isPublishing,
                     decoration: const InputDecoration(
                       hintText: 'Up to 800 characters',
