@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -140,8 +139,7 @@ class FeedPage extends StatefulWidget {
 }
 
 class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
-  static const int _minDwellMs = 3000; // 3-second lower bound
-  static const int _maxStretchMs = 30000; // 30-second cap per centered stretch
+  static const int _lingerThresholdMs = 3500; // 3.5-second linger threshold
   static const Duration _flushInterval = Duration(seconds: 150); // 2.5 minutes
 
   String _selectedFilter = 'Newest';
@@ -165,11 +163,11 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   final GlobalKey _feedViewportKey = GlobalKey();
   final Map<String, GlobalKey> _postKeys = {};
 
-  // Non-UI dwell tracking state (no setState on scroll/focus updates)
+  // Session-level linger tracking state (no setState on scroll/focus updates)
   String? _currentCenteredPostId;
   DateTime? _centeredSince;
-  DateTime? _lastFocusSampleTime;
-  final Map<String, int> _pendingViewMs = {};
+  final Set<String> _lingerRecordedInSession = <String>{};
+  final Map<String, int> _pendingLingerCounts = <String, int>{};
   Timer? _flushTimer;
   Timer? _focusSampleTimer;
 
@@ -181,12 +179,12 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     _fetchPosts();
 
     _flushTimer = Timer.periodic(_flushInterval, (_) {
-      _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: true);
-      _flushViewMetrics();
+      _evaluateCenteredPostLinger(DateTime.now());
+      _flushLingerMetrics();
     });
 
-    // Periodically sample so long stays on a single post respect the 30s cap
-    _focusSampleTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    // Periodically evaluate so lingering past 3.5s registers without waiting for scroll
+    _focusSampleTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
       _updateCenteredPostFocus();
     });
   }
@@ -197,8 +195,8 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached ||
         state == AppLifecycleState.hidden) {
-      _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
-      _flushViewMetrics();
+      _evaluateCenteredPostLinger(DateTime.now());
+      _flushLingerMetrics();
     } else if (state == AppLifecycleState.resumed) {
       _updateCenteredPostFocus();
     }
@@ -209,17 +207,33 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _flushTimer?.cancel();
     _focusSampleTimer?.cancel();
-    _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
-    _flushViewMetrics();
+    _evaluateCenteredPostLinger(DateTime.now());
+    _flushLingerMetrics();
     _scrollController.dispose();
     super.dispose();
   }
 
+  void _evaluateCenteredPostLinger(DateTime now) {
+    final activeId = _currentCenteredPostId;
+    final start = _centeredSince;
+    if (activeId == null || start == null) return;
+    if (_lingerRecordedInSession.contains(activeId)) return;
+
+    final elapsedMs = now.difference(start).inMilliseconds;
+    if (elapsedMs >= _lingerThresholdMs) {
+      _lingerRecordedInSession.add(activeId);
+      _pendingLingerCounts[activeId] = (_pendingLingerCounts[activeId] ?? 0) + 1;
+    }
+  }
+
   void _updateCenteredPostFocus() {
     final now = DateTime.now();
+    _evaluateCenteredPostLinger(now);
+
     final viewportContext = _feedViewportKey.currentContext;
     if (viewportContext == null) {
-      _finalizeCenteredStretch(now, restartIfStillCentered: false);
+      _currentCenteredPostId = null;
+      _centeredSince = null;
       return;
     }
 
@@ -266,81 +280,44 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     }
 
     if (bestPostId == _currentCenteredPostId) {
-      if (_currentCenteredPostId != null && _centeredSince != null) {
-        final rawElapsed = now.difference(_centeredSince!).inMilliseconds;
-        // Enforce 30-second cap on the active continuous stretch
-        if (rawElapsed >= _maxStretchMs) {
-          _recordCappedStretch(_currentCenteredPostId!, _maxStretchMs);
-          _centeredSince = now;
-        }
-      }
-      _lastFocusSampleTime = now;
       return;
     }
 
-    // Centered post changed: finalize previous stretch and start new one
-    _finalizeCenteredStretch(now, restartIfStillCentered: false);
     _currentCenteredPostId = bestPostId;
     _centeredSince = bestPostId != null ? now : null;
-    _lastFocusSampleTime = now;
   }
 
-  void _finalizeCenteredStretch(DateTime now, {required bool restartIfStillCentered}) {
-    final activeId = _currentCenteredPostId;
-    final start = _centeredSince;
-    if (activeId != null && start != null) {
-      final elapsedMs = now.difference(start).inMilliseconds;
-      final cappedMs = math.min(elapsedMs, _maxStretchMs);
-      if (cappedMs >= _minDwellMs) {
-        _pendingViewMs[activeId] = (_pendingViewMs[activeId] ?? 0) + cappedMs;
-      }
-    }
+  Future<void> _flushLingerMetrics() async {
+    if (_pendingLingerCounts.isEmpty) return;
 
-    if (restartIfStillCentered && activeId != null) {
-      _centeredSince = now;
-    } else {
-      _currentCenteredPostId = null;
-      _centeredSince = null;
-    }
-  }
-
-  void _recordCappedStretch(String postId, int cappedMs) {
-    if (cappedMs >= _minDwellMs) {
-      _pendingViewMs[postId] = (_pendingViewMs[postId] ?? 0) + cappedMs;
-    }
-  }
-
-  Future<void> _flushViewMetrics() async {
-    if (_pendingViewMs.isEmpty) return;
-
-    final batchEntries = Map<String, int>.from(_pendingViewMs);
-    _pendingViewMs.clear();
+    final batchEntries = Map<String, int>.from(_pendingLingerCounts);
+    _pendingLingerCounts.clear();
 
     final batch = FirebaseFirestore.instance.batch();
     final postsCollection = FirebaseFirestore.instance.collection('posts');
 
-    batchEntries.forEach((postId, ms) {
+    batchEntries.forEach((postId, count) {
       final docRef = postsCollection.doc(postId);
       batch.update(docRef, {
-        'viewTimeMs': FieldValue.increment(ms),
+        'lingerCount': FieldValue.increment(count),
       });
     });
 
     try {
       await batch.commit();
     } catch (e) {
-      // Restore unsent durations if flush fails so they aren't lost
-      batchEntries.forEach((postId, ms) {
-        _pendingViewMs[postId] = (_pendingViewMs[postId] ?? 0) + ms;
+      // Restore unsent counts if flush fails so they aren't lost
+      batchEntries.forEach((postId, count) {
+        _pendingLingerCounts[postId] = (_pendingLingerCounts[postId] ?? 0) + count;
       });
-      debugPrint('Error flushing view metrics: $e');
+      debugPrint('Error flushing linger metrics: $e');
     }
   }
 
   void _onScroll() {
     _updateCenteredPostFocus();
 
-    // Auto-load more posts when scrolling near the bottom (or approaching the 9th post)
+    // Auto-load more posts when scrolling near the bottom
     if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 300) {
       if (!_isLoading && _hasMore) {
         _fetchPosts();
@@ -379,24 +356,24 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         final timeLimit = now.subtract(const Duration(hours: 1));
         query = query
             .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
-            .orderBy('viewTimeMs', descending: true);
+            .orderBy('lingerCount', descending: true);
       } else if (_selectedFilter == 'Past 12 Hours') {
         final timeLimit = now.subtract(const Duration(hours: 12));
         query = query
             .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
-            .orderBy('viewTimeMs', descending: true);
+            .orderBy('lingerCount', descending: true);
       } else if (_selectedFilter == 'Past Day') {
         final timeLimit = now.subtract(const Duration(days: 1));
         query = query
             .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
-            .orderBy('viewTimeMs', descending: true);
+            .orderBy('lingerCount', descending: true);
       } else if (_selectedFilter == 'Past Week') {
         final timeLimit = now.subtract(const Duration(days: 7));
         query = query
             .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(timeLimit))
-            .orderBy('viewTimeMs', descending: true);
+            .orderBy('lingerCount', descending: true);
       } else if (_selectedFilter == 'Hall of Fame') {
-        query = query.orderBy('viewTimeMs', descending: true);
+        query = query.orderBy('lingerCount', descending: true);
       }
 
       if (_lastDocument != null) {
@@ -439,8 +416,10 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   }
 
   Future<void> _onFilterChanged(String newFilter) async {
-    _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
-    await _flushViewMetrics();
+    _evaluateCenteredPostLinger(DateTime.now());
+    _currentCenteredPostId = null;
+    _centeredSince = null;
+    await _flushLingerMetrics();
     setState(() {
       _selectedFilter = newFilter;
     });
@@ -484,8 +463,10 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                 Center(
                   child: ElevatedButton.icon(
                     onPressed: () async {
-                      _finalizeCenteredStretch(DateTime.now(), restartIfStillCentered: false);
-                      await _flushViewMetrics();
+                      _evaluateCenteredPostLinger(DateTime.now());
+                      _currentCenteredPostId = null;
+                      _centeredSince = null;
+                      await _flushLingerMetrics();
                       await Navigator.push(
                         context,
                         MaterialPageRoute(builder: (context) => const MakePostPage()),

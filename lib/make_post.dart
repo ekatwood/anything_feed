@@ -72,7 +72,7 @@ class _MakePostPageState extends State<MakePostPage> {
         'type': 'text',
         'text': textContent,
         'timestamp': FieldValue.serverTimestamp(),
-        'viewTimeMs': 0,
+        'lingerCount': 0,
       };
 
       await FirebaseFirestore.instance.collection('posts').add(postData);
