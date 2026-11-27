@@ -128,7 +128,6 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   static const int _minDwellMs = 3000; // 3-second lower bound
   static const int _maxStretchMs = 30000; // 30-second cap per centered stretch
   static const Duration _flushInterval = Duration(seconds: 150); // 2.5 minutes
-  static const Duration _imageLoadTimeout = Duration(seconds: 8);
 
   String _selectedFilter = 'Newest';
   final List<String> _filters = [
@@ -334,29 +333,6 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _precacheBatchImages(List<DocumentSnapshot> docs) async {
-    if (!mounted) return;
-
-    final List<Future<void>> futures = <Future<void>>[];
-    for (final doc in docs) {
-      final data = doc.data() as Map<String, dynamic>?;
-      final imageUrl = data?['imageUrl'] as String?;
-      if (imageUrl != null && imageUrl.isNotEmpty) {
-        futures.add(
-          precacheImage(NetworkImage(imageUrl), context)
-              .timeout(_imageLoadTimeout)
-              .catchError((Object err) {
-            debugPrint('Image precache warning for $imageUrl: $err');
-          }),
-        );
-      }
-    }
-
-    if (futures.isNotEmpty) {
-      await Future.wait(futures);
-    }
-  }
-
   Future<void> _fetchPosts({bool reset = false}) async {
     if (reset) {
       _fetchGeneration++;
@@ -414,9 +390,6 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
 
       query = query.limit(_limit);
       final querySnapshot = await query.get();
-      if (!mounted || generation != _fetchGeneration) return;
-
-      await _precacheBatchImages(querySnapshot.docs);
       if (!mounted || generation != _fetchGeneration) return;
 
       final bool reachedEnd = querySnapshot.docs.length < _limit;
@@ -579,9 +552,6 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                   final doc = _posts[index];
                   final data = doc.data() as Map<String, dynamic>;
                   final text = data['text'] as String?;
-                  final imageUrl = data['imageUrl'] as String?;
-                  final caption = (data['caption'] as String?) ?? text;
-                  final hasImage = imageUrl != null && imageUrl.isNotEmpty;
                   final cardKey = _postKeys.putIfAbsent(doc.id, () => GlobalKey());
 
                   return Center(
@@ -592,40 +562,12 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                         child: Padding(
                           padding: const EdgeInsets.all(16.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              if (!hasImage && text != null && text.isNotEmpty) ...[
-                                Text(
-                                  text,
-                                  style: const TextStyle(fontSize: 21),
-                                ),
-                              ],
-                              if (hasImage) ...[
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(maxHeight: 800),
-                                    child: Image.network(
-                                      imageUrl,
-                                      fit: BoxFit.contain,
-                                    ),
-                                  ),
-                                ),
-                                if (caption != null && caption.isNotEmpty) ...[
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    caption,
-                                    style: const TextStyle(
-                                      fontSize: 19,
-                                      fontStyle: FontStyle.italic,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ],
-                          ),
+                          child: text != null && text.isNotEmpty
+                              ? Text(
+                            text,
+                            style: const TextStyle(fontSize: 21),
+                          )
+                              : const SizedBox.shrink(),
                         ),
                       ),
                     ),
