@@ -3,31 +3,46 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
 import 'make_post.dart';
+
+const String _darkModePrefKey = 'is_dark_mode';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  runApp(const TrendingNowApp());
+  final SharedPreferences prefs = await SharedPreferences.getInstance();
+  final bool initialDarkMode = prefs.getBool(_darkModePrefKey) ?? false;
+  runApp(TrendingNowApp(initialDarkMode: initialDarkMode));
 }
 
 class TrendingNowApp extends StatefulWidget {
-  const TrendingNowApp({Key? key}) : super(key: key);
+  final bool initialDarkMode;
+
+  const TrendingNowApp({Key? key, this.initialDarkMode = false}) : super(key: key);
 
   @override
   State<TrendingNowApp> createState() => _TrendingNowAppState();
 }
 
 class _TrendingNowAppState extends State<TrendingNowApp> {
-  ThemeMode _themeMode = ThemeMode.light;
+  late ThemeMode _themeMode;
 
-  void _toggleTheme(bool isDark) {
+  @override
+  void initState() {
+    super.initState();
+    _themeMode = widget.initialDarkMode ? ThemeMode.dark : ThemeMode.light;
+  }
+
+  Future<void> _toggleTheme(bool isDark) async {
     setState(() {
       _themeMode = isDark ? ThemeMode.dark : ThemeMode.light;
     });
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_darkModePrefKey, isDark);
   }
 
   @override

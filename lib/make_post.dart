@@ -71,8 +71,6 @@ class _MakePostPageState extends State<MakePostPage> {
       final Map<String, dynamic> postData = <String, dynamic>{
         'type': 'text',
         'text': textContent,
-        'imageUrl': null,
-        'storagePath': null,
         'timestamp': FieldValue.serverTimestamp(),
         'viewTimeMs': 0,
       };
