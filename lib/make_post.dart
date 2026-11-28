@@ -9,8 +9,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'human_test.dart';
 
 const int _maxTextChars = 800;
-const int _maxNewlines = 6;
-const int _maxConsecutiveNewlines = 2;
+const int _maxNewlines = 10;
+const int _maxConsecutiveNewlines = 3;
 const int _maxPostsPerHour = 5;
 const Duration _minPostInterval = Duration(seconds: 10);
 const Duration _rateWindow = Duration(hours: 1);

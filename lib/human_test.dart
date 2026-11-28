@@ -10,7 +10,7 @@ import 'package:web/web.dart' as web;
 const int _humanCheckValidityMs = 7200000; // 2 hours
 const String _humanVerifiedPrefKey = 'human_verified_timestamp';
 
-// Replace with your Cloudflare Turnstile Site Key (public key).
+// Cloudflare Turnstile Site Key (public key).
 const String _turnstileSiteKey = '0x4AAAAAAGWLwhlANVORLWZw';
 
 @JS('cloudflareTurnstileBridge')
@@ -196,7 +196,10 @@ class _HumanTestDialogState extends State<HumanTestDialog> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          const Text('Complete the quick check below to continue posting.'),
+          const Text(
+              'Complete the quick check below to continue posting.',
+               style: TextStyle(fontSize: 19),
+          ),
           const SizedBox(height: 16),
           SizedBox(
             height: 76,
@@ -221,12 +224,18 @@ class _HumanTestDialogState extends State<HumanTestDialog> {
       actions: <Widget>[
         TextButton(
           onPressed: () => Navigator.of(context).pop<String>(null),
-          child: const Text('Cancel'),
+          child: const Text(
+            'Cancel',
+            style: TextStyle(fontSize: 19),
+          ),
         ),
         if (_errorMessage != null && kIsWeb)
           TextButton(
             onPressed: _ensureContainerAndVerify,
-            child: const Text('Retry'),
+            child: const Text(
+                'Retry',
+                style: TextStyle(fontSize: 19),
+            ),
           ),
       ],
     );
