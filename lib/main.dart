@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -110,6 +111,7 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
             backgroundColor: lightColorScheme.primaryContainer,
             foregroundColor: lightColorScheme.onPrimaryContainer,
             textStyle: const TextStyle(
+              inherit: false,
               fontFamily: 'CormorantGaramond',
               fontSize: 16,
               fontWeight: FontWeight.bold,
@@ -225,6 +227,128 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     _focusSampleTimer ??= Timer.periodic(const Duration(milliseconds: 500), (_) {
       _updateCenteredPostFocus();
     });
+  }
+
+  Future<void> _copyToClipboard(BuildContext context, String label, String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          'Copied $label to clipboard',
+          style: const TextStyle(fontSize: 19),
+        ),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Widget _buildDonateRow({
+    required BuildContext context,
+    required String label,
+    required String displayValue,
+    required String copyValue,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: SelectableText(
+              '$label: $displayValue',
+              style: const TextStyle(fontSize: 19),
+            ),
+          ),
+          const SizedBox(width: 8),
+          ElevatedButton(
+            onPressed: () => _copyToClipboard(context, label, copyValue),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text(
+              'copy',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showDonateDialog() async {
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text(
+            'Donate',
+            style: TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'To keep this website running with no advertisements, we accept donations from users.',
+                  style: TextStyle(fontSize: 19),
+                ),
+                const SizedBox(height: 16),
+                _buildDonateRow(
+                  context: context,
+                  label: 'Venmo',
+                  displayValue: 'ricokristo',
+                  copyValue: 'ricokristo',
+                ),
+                _buildDonateRow(
+                  context: context,
+                  label: 'Bitcoin',
+                  displayValue: 'bc1q...8dy3',
+                  copyValue: 'bc1qe48v6lwl7e36ulunnm97stkkq996rtu8uf8dy3',
+                ),
+                _buildDonateRow(
+                  context: context,
+                  label: 'Ethereum',
+                  displayValue: '0x0800...f27c',
+                  copyValue: '0x0800Abd81c9829128e2D0132F8bA2BEbb078f27c',
+                ),
+                _buildDonateRow(
+                  context: context,
+                  label: 'Solana',
+                  displayValue: 'B63L...kBYY',
+                  copyValue: 'B63Leg7iwmGtwZMxKZoHBTYv2DqNo2CCLoaXZxdpkBYY',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text(
+                'Close',
+                style: TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _showDisclaimerDialog() async {
@@ -558,7 +682,26 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
           SliverToBoxAdapter(
             child: Column(
               children: [
-                const SizedBox(height: 16),
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0, right: 16.0),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: ElevatedButton(
+                      onPressed: _showDonateDialog,
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      ),
+                      child: const Text(
+                        'Donate',
+                        style: TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
                 Center(
                   child: ElevatedButton.icon(
                     onPressed: () async {
@@ -576,6 +719,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                     label: const Text('Make a Post'),
                     style: ElevatedButton.styleFrom(
                       textStyle: const TextStyle(
+                        inherit: false,
                         fontFamily: 'CormorantGaramond',
                         fontSize: 19,
                         fontWeight: FontWeight.w700,
