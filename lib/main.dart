@@ -7,6 +7,7 @@ import 'firebase_options.dart';
 import 'make_post.dart';
 
 const String _darkModePrefKey = 'is_dark_mode';
+const String _disclaimerAcceptedPrefKey = 'has_accepted_disclaimer';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -15,13 +16,26 @@ void main() async {
   );
   final SharedPreferences prefs = await SharedPreferences.getInstance();
   final bool initialDarkMode = prefs.getBool(_darkModePrefKey) ?? false;
-  runApp(TrendingNowApp(initialDarkMode: initialDarkMode));
+  final bool hasAcceptedDisclaimer =
+      prefs.getBool(_disclaimerAcceptedPrefKey) ?? false;
+
+  runApp(
+    TrendingNowApp(
+      initialDarkMode: initialDarkMode,
+      initialDisclaimerAccepted: hasAcceptedDisclaimer,
+    ),
+  );
 }
 
 class TrendingNowApp extends StatefulWidget {
   final bool initialDarkMode;
+  final bool initialDisclaimerAccepted;
 
-  const TrendingNowApp({Key? key, this.initialDarkMode = false}) : super(key: key);
+  const TrendingNowApp({
+    Key? key,
+    this.initialDarkMode = false,
+    this.initialDisclaimerAccepted = false,
+  }) : super(key: key);
 
   @override
   State<TrendingNowApp> createState() => _TrendingNowAppState();
@@ -123,7 +137,11 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
         ),
       ),
       themeMode: _themeMode,
-      home: FeedPage(onThemeChanged: _toggleTheme, currentThemeMode: _themeMode),
+      home: FeedPage(
+        onThemeChanged: _toggleTheme,
+        currentThemeMode: _themeMode,
+        initialDisclaimerAccepted: widget.initialDisclaimerAccepted,
+      ),
     );
   }
 }
@@ -131,8 +149,14 @@ class _TrendingNowAppState extends State<TrendingNowApp> {
 class FeedPage extends StatefulWidget {
   final Function(bool) onThemeChanged;
   final ThemeMode currentThemeMode;
+  final bool initialDisclaimerAccepted;
 
-  const FeedPage({Key? key, required this.onThemeChanged, required this.currentThemeMode}) : super(key: key);
+  const FeedPage({
+    Key? key,
+    required this.onThemeChanged,
+    required this.currentThemeMode,
+    required this.initialDisclaimerAccepted,
+  }) : super(key: key);
 
   @override
   State<FeedPage> createState() => _FeedPageState();
@@ -141,6 +165,8 @@ class FeedPage extends StatefulWidget {
 class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   static const int _lingerThresholdMs = 3500; // 3.5-second linger threshold
   static const Duration _flushInterval = Duration(seconds: 150); // 2.5 minutes
+
+  late bool _hasAcceptedDisclaimer;
 
   String _selectedFilter = 'Newest';
   final List<String> _filters = [
@@ -174,23 +200,83 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _hasAcceptedDisclaimer = widget.initialDisclaimerAccepted;
     WidgetsBinding.instance.addObserver(this);
     _scrollController.addListener(_onScroll);
+
+    if (_hasAcceptedDisclaimer) {
+      _startFeed();
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showDisclaimerDialog();
+      });
+    }
+  }
+
+  void _startFeed() {
     _fetchPosts();
 
-    _flushTimer = Timer.periodic(_flushInterval, (_) {
+    _flushTimer ??= Timer.periodic(_flushInterval, (_) {
       _evaluateCenteredPostLinger(DateTime.now());
       _flushLingerMetrics();
     });
 
     // Periodically evaluate so lingering past 3.5s registers without waiting for scroll
-    _focusSampleTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    _focusSampleTimer ??= Timer.periodic(const Duration(milliseconds: 500), (_) {
       _updateCenteredPostFocus();
     });
   }
 
+  Future<void> _showDisclaimerDialog() async {
+    if (!mounted || _hasAcceptedDisclaimer) return;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: const Text(
+              'You must be 18 years or older to use this website.\n\n'
+                  'There are no filters except you are not allowed to post a link, and it filters out repeated spam.',
+              style: TextStyle(fontSize: 19),
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () async {
+                  final SharedPreferences prefs =
+                  await SharedPreferences.getInstance();
+                  await prefs.setBool(_disclaimerAcceptedPrefKey, true);
+                  if (dialogContext.mounted) {
+                    Navigator.of(dialogContext).pop();
+                  }
+                },
+                child: const Text(
+                  'I understand',
+                  style: TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _hasAcceptedDisclaimer = true;
+    });
+    _startFeed();
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_hasAcceptedDisclaimer) return;
+
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached ||
@@ -227,6 +313,8 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   }
 
   void _updateCenteredPostFocus() {
+    if (!_hasAcceptedDisclaimer) return;
+
     final now = DateTime.now();
     _evaluateCenteredPostLinger(now);
 
@@ -315,6 +403,8 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   }
 
   void _onScroll() {
+    if (!_hasAcceptedDisclaimer) return;
+
     _updateCenteredPostFocus();
 
     // Auto-load more posts when scrolling near the bottom
@@ -326,6 +416,8 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   }
 
   Future<void> _fetchPosts({bool reset = false}) async {
+    if (!_hasAcceptedDisclaimer) return;
+
     if (reset) {
       _fetchGeneration++;
       _currentCenteredPostId = null;
@@ -429,6 +521,13 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final isDarkMode = widget.currentThemeMode == ThemeMode.dark;
+
+    if (!_hasAcceptedDisclaimer) {
+      return const Scaffold(
+        body: SizedBox.expand(),
+      );
+    }
+
     final hasFooterSpinner = _hasMore;
     final itemCount = _posts.length + (hasFooterSpinner ? 1 : 0);
 

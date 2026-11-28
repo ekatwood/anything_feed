@@ -422,11 +422,12 @@ class _MakePostPageState extends State<MakePostPage> {
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       child: _isPublishing
-                          ? const SizedBox(
+                          ? SizedBox(
                         width: 20,
                         height: 20,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
+                          color: colorScheme.onPrimary,
                         ),
                       )
                           : const Text(
